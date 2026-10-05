@@ -1,0 +1,222 @@
+#include <avr/io.h>
+#include <util/delay.h>
+
+#define F_CPU 16000000UL
+
+// LLAMADO A FUNCIONES
+void UART_init(unsigned int ubrr);
+void UART_mandarLetra(char data);
+char UART_recibir(void);
+void UART_mandarPalabras(const char *str);
+
+// Buzzers
+void sonar_frecuencia_buzzer1(uint16_t hz); // Controla PB2 (Timer 1)
+void sonar_frecuencia_buzzer2(uint16_t hz); // Controla PB3 (Timer 2)
+
+// Modos
+void piano(void);
+void cancion1(void);
+void cancion2(void);
+void cancion3(void);
+
+
+int main(void)
+{
+	UART_init(103);
+	UART_mandarPalabras("Selecciona el modo de operacion! \r \n 0 - Piano \r \n 1 - Cancion 1 \r \n 2 - Cancion 2 \r \n 3 - Cancion 3 \r \n");
+	
+	// Inicializacion de entradas y salidas
+	DDRD = 0x00;
+	PORTD = 0xFF;
+	
+	DDRB |= (1 << PB2) | (1 << PB3);
+	
+	// Timer 1
+	TCCR1A = (1 << COM1B0);
+	TCCR1B = (1 << WGM12);
+	
+	// Timer 2
+	TCCR2A = (1 << COM2A0) | (1 << WGM21);
+	TCCR2B = 0; // Apagado inicialmente
+	
+	while (1)
+	{
+		// Seleccion de modos
+		
+		char recibido = UART_recibir();
+		switch(recibido){
+			
+			case '0':
+			piano();
+			break;
+			
+			case '1':
+			cancion1();
+			break;
+			
+			case '2':
+			cancion2();
+			break;
+			
+			case '3':
+			cancion3();
+			break;
+			
+			default:
+			UART_mandarPalabras("Seleccion no valida !!! Vamo arriba Jesus, deja de probar cosas \r \n");
+			break;
+		}
+	}
+	return 0;
+}
+
+
+// MODO PIANO
+void piano(){
+	UART_mandarPalabras("Modo Piano Activo. Presione botones en PORTD. Envie 'q' por UART para salir...\r\n");
+	char instruccion = '1';
+	
+	// Comprobacion de salida a menu
+	while(instruccion != 'q'){
+		
+		if (UCSR0A & (1 << RXC0)) {
+			instruccion = UDR0;
+			if(instruccion == 'q') break;
+			
+		}
+		
+		// Leemos botones
+		uint8_t botones = ~PIND;
+		
+		// NOTAS
+		switch(botones){
+			case 0b00000001:
+			sonar_frecuencia_buzzer1(262); // DO
+			sonar_frecuencia_buzzer2(262);
+			break;
+			case 0b00000010:
+			sonar_frecuencia_buzzer1(294); // RE
+			sonar_frecuencia_buzzer2(294);
+			break;
+			case 0b00000100:
+			sonar_frecuencia_buzzer1(330); // MI
+			sonar_frecuencia_buzzer2(330);
+			break;
+			case 0b00001000:
+			sonar_frecuencia_buzzer1(349); // FA
+			sonar_frecuencia_buzzer2(349);
+			break;
+			case 0b00010000:
+			sonar_frecuencia_buzzer1(392); // SOL
+			sonar_frecuencia_buzzer2(392);
+			break;
+			case 0b00100000:
+			sonar_frecuencia_buzzer1(440); // LA
+			sonar_frecuencia_buzzer2(440);
+			break;
+			
+			case 0b01000000:
+			sonar_frecuencia_buzzer1(494); // SI
+			sonar_frecuencia_buzzer2(494);
+			break;
+			
+			case 0b10000000:
+			sonar_frecuencia_buzzer1(523); // DO agudo
+			sonar_frecuencia_buzzer2(523);
+			break;
+			
+			default:
+			sonar_frecuencia_buzzer1(0);
+			sonar_frecuencia_buzzer2(0);
+			break;
+		}
+		_delay_ms(20); // Delay debouncer basico
+	}
+	
+	// Aseguramos no dejar buzzers sonando
+	sonar_frecuencia_buzzer1(0);
+	sonar_frecuencia_buzzer2(0);
+	UART_mandarPalabras("Volviendo al menu principal...\r\n");
+}
+
+
+// Modo canciones
+void cancion1(){}
+void cancion2(){}
+void cancion3(){}
+
+// BUZZER 1 (Pin PB2): Usa Timer 1 (16 bits) con prescaler fijo de 64
+void sonar_frecuencia_buzzer1(uint16_t hz) {
+	if (hz == 0) {
+		TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10)); // Apaga reloj
+		PORTB &= ~(1 << PB2);
+		return;
+	}
+	uint32_t ocr_val = (F_CPU / (2UL * 64UL * hz)) - 1;
+	OCR1B = (uint16_t)ocr_val;
+
+	TCCR1B |= (1 << CS11) | (1 << CS10); // Prescaler 64
+}
+
+// BUZZER 2 (Pin PB3): Usa Timer 2 (8 bits) con PRESCALER DINAMICO
+void sonar_frecuencia_buzzer2(uint16_t hz) {
+	if (hz == 0) {
+		TCCR2B = 0; // Apaga reloj del Timer 2
+		PORTB &= ~(1 << PB3);
+		return;
+	}
+
+	uint32_t ocr_val;
+
+	// Intentamos primero con prescaler de 64 (Ideal para notas agudas > 490 Hz)
+	ocr_val = (F_CPU / (2UL * 64UL * hz)) - 1;
+
+	if (ocr_val <= 255) {
+		OCR2A = (uint8_t)ocr_val;
+		TCCR2B = (1 << CS22); // Enciende Timer 2 con Prescaler 64
+	}
+	else {
+		// Si desborda, intentamos con prescaler de 256 (Notas medias: ~123 Hz a 490 Hz)
+		ocr_val = (F_CPU / (2UL * 256UL * hz)) - 1;
+		
+		if (ocr_val <= 255) {
+			OCR2A = (uint8_t)ocr_val;
+			TCCR2B = (1 << CS22) | (1 << CS21); // Enciende Timer 2 con Prescaler 256
+		}
+		else {
+			// Si sigue desbordando, usamos prescaler de 1024 (Notas muy graves < 123 Hz)
+			ocr_val = (F_CPU / (2UL * 1024UL * hz)) - 1;
+			if (ocr_val > 255) ocr_val = 255; // Limite fisico absoluto
+			
+			OCR2A = (uint8_t)ocr_val;
+			TCCR2B = (1 << CS22) | (1 << CS21) | (1 << CS20); // Enciende Timer 2 con Prescaler 1024
+		}
+	}
+}
+
+// Inicializacion de comunicacion UART
+void UART_init(unsigned int ubrr) {
+	UBRR0H = (unsigned char)(ubrr >> 8);
+	UBRR0L = (unsigned char)ubrr;
+	UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+// Enviar caracter por UART
+void UART_mandarLetra(char data) {
+	while (!(UCSR0A & (1 << UDRE0)));
+	UDR0 = data;
+}
+
+// Recibir Caracter por UART
+char UART_recibir(void){
+	while (!(UCSR0A & (1 << RXC0)));
+	return UDR0;
+}
+
+// Enviar cadena de caracteres mediante UART
+void UART_mandarPalabras(const char *str) {
+	while (*str){
+		UART_mandarLetra(*str++);
+	}
+}
