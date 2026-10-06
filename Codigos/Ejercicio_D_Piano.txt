@@ -1,9 +1,23 @@
-#define F_CPU 16000000UL   
+#define F_CPU 16000000UL
 
 #include <avr/io.h>
 #include <util/delay.h>
+#include <avr/pgmspace.h>
 
-// LLAMADO A FUNCIONES 
+// Notas (Hz) - Mi mayor
+#define B4   494
+#define D5s  622
+#define E5   659
+#define F5s  740
+#define G5s  831
+#define A5   880
+#define B5   988
+#define C6s  1109
+#define SIL  0
+
+typedef struct { uint16_t hz; uint8_t dur; } Nota;   // duracion en 32avos
+
+// LLAMADO A FUNCIONES
 void UART_init(unsigned int ubrr);
 void UART_mandarLetra(char data);
 char UART_recibir(void);
@@ -28,15 +42,15 @@ int main(void)
 	// Salidas de buzzers
 	DDRB |= (1 << PB2) | (1 << PB3);
 
-	// Timer 1: CTC 
+	// Timer 1: CTC
 	TCCR1A = 0; // Apagado inicialmente
 	TCCR1B = (1 << WGM12);
 
-	// Timer 2: CTC 
+	// Timer 2: CTC
 	TCCR2A = (1 << WGM21);
 	TCCR2B = 0; // Apagado inicialmente
 
-	UART_init(103); 
+	UART_init(103);
 	UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1\r\n2 - Cancion 2\r\n3 - Cancion 3\r\n");
 
 	while (1)
@@ -79,7 +93,7 @@ int main(void)
 }
 
 
-// MODO PIANO 
+// MODO PIANO
 void piano(void) {
 	static const uint16_t notas[8] = {262, 294, 330, 349, 392, 440, 494, 523}; //NOTAS
 
@@ -119,7 +133,67 @@ void piano(void) {
 
 
 // Modo canciones
-void cancion1(void) {}
+/* CANCION 1: "La Primavera" (Las Cuatro Estaciones) - Antonio Vivaldi
+ * Seccion A (ritornello), solo violin -> buzzer 1.
+ * Duraciones en 32avos: 16avo=2, corchea=4, negra=8, negra con puntillo=12 */
+
+#define COMPAS_1 {G5s,4},{G5s,4},{G5s,4},{F5s,2},{E5,2},{B5,12},{B5,2},{A5,2}
+#define COMPAS_3 {G5s,4},{A5,2},{B5,2},{A5,4},{G5s,4},{F5s,4},{D5s,4},{B4,4},{E5,4}
+#define COMPAS_7 {B5,4},{A5,2},{G5s,2},{A5,4},{B5,4},{C6s,4},{B5,8},{E5,4}
+
+static const Nota tema[] PROGMEM = {
+	{E5,4},                                   // anacrusa
+	COMPAS_1,                                 // c.1
+	COMPAS_1,                                 // c.2
+	COMPAS_3,                                 // c.3
+	COMPAS_1,                                 // c.4
+	COMPAS_1,                                 // c.5
+	{G5s,4},{A5,2},{B5,2},{A5,4},{G5s,4},{F5s,8},{SIL,4},{E5,4},   // c.6
+	COMPAS_7,                                 // c.7  (piano/forte)
+	COMPAS_7,                                 // c.8
+	{C6s,4},{B5,8},{A5,4},{G5s,4},{F5s,2},{E5,2},                  // c.9
+	{F5s,1},{G5s,1},{F5s,1},{G5s,1},{F5s,1},{G5s,1},{F5s,1},{G5s,1}, // trino
+	{F5s,8},{SIL,4},{E5,4},{B5,4},{A5,2},{G5s,2},{A5,4},{B5,4},    // c.10
+	{C6s,4},{B5,8},{E5,4},{B5,4},{A5,2},{G5s,2},{A5,4},{B5,4},     // c.11
+	{C6s,4},{B5,8},{E5,4},{C6s,4},{B5,8},{A5,4},                   // c.12
+	{E5,16}                                   // cierre
+};
+
+#define UNIDAD_MS 60   // duracion de un 32avo (baja el numero para ir mas rapido)
+
+// Espera ms milisegundos. Devuelve 1 si llego una 'q' por UART.
+static uint8_t esperar_ms(uint16_t ms) {
+	while (ms--) {
+		if ((UCSR0A & (1 << RXC0)) && UDR0 == 'q') return 1;
+		_delay_ms(1);
+	}
+	return 0;
+}
+
+void cancion1(void) {
+	UART_mandarPalabras("Cancion 1: La Primavera (Vivaldi). Envie 'q' para salir...\r\n");
+
+	for (uint16_t i = 0; i < sizeof(tema) / sizeof(tema[0]); i++) {
+		Nota n;
+		memcpy_P(&n, &tema[i], sizeof(Nota));
+
+		uint16_t total = (uint16_t)n.dur * UNIDAD_MS;
+		uint16_t gap   = (n.dur >= 3) ? 12 : 0;   // silencio corto para separar notas repetidas
+
+		sonar_frecuencia_buzzer1(n.hz);
+		if (esperar_ms(total - gap)) goto salir;
+
+		if (gap) {
+			sonar_frecuencia_buzzer1(0);
+			if (esperar_ms(gap)) goto salir;
+		}
+	}
+
+salir:
+	sonar_frecuencia_buzzer1(0);
+	sonar_frecuencia_buzzer2(0);
+	UART_mandarPalabras("Volviendo al menu principal...\r\n");
+}
 void cancion2(void) {}
 void cancion3(void) {}
 
@@ -131,17 +205,17 @@ void sonar_frecuencia_buzzer1(uint16_t hz) {
 	actual = hz;
 
 	if (hz == 0) {
-		TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10)); 
-		TCCR1A &= ~(1 << COM1B0);                             
+		TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10));
+		TCCR1A &= ~(1 << COM1B0);
 		PORTB &= ~(1 << PB2);
 		return;
 	}
 
 	uint16_t ocr = (F_CPU / (2UL * 64UL * hz)) - 1;
-	OCR1A = ocr;                         
-	OCR1B = ocr;                        
+	OCR1A = ocr;
+	OCR1B = ocr;
 	TCNT1 = 0;
-	TCCR1A |= (1 << COM1B0);             
+	TCCR1A |= (1 << COM1B0);
 	TCCR1B |= (1 << CS11) | (1 << CS10); // prescaler 64
 }
 
@@ -153,8 +227,8 @@ void sonar_frecuencia_buzzer2(uint16_t hz) {
 	actual = hz;
 
 	if (hz == 0) {
-		TCCR2B = 0;                       
-		TCCR2A &= ~(1 << COM2A0);         
+		TCCR2B = 0;
+		TCCR2A &= ~(1 << COM2A0);
 		PORTB &= ~(1 << PB3);
 		return;
 	}
