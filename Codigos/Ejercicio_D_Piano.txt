@@ -4,7 +4,11 @@
 #include <util/delay.h>
 #include <avr/pgmspace.h>
 
-// Notas (Hz) - Mi mayor
+// Notas (Hz)
+
+#define SIL  0
+
+// Primavera Vivaldi (Mi mayor)
 #define B4   494
 #define D5s  622
 #define E5   659
@@ -13,9 +17,48 @@
 #define A5   880
 #define B5   988
 #define C6s  1109
-#define SIL  0
+#define B2   123
+#define E3   165
+#define A3   220
+#define B3   247
+
+// Mision Imposible (Sol menor)
+#define E4   330
+#define F4   349
+#define F4s  370
+#define G4   392
+#define Bb4  466
+#define C5   523
+#define Db5  554
+#define D5   587
+#define Eb5  622
+#define F5   698
+#define G5   784
+
+// Bajo Mision Imposible
+#define E2   82
+#define F2   87
+#define F2s  92
+#define G2   98
+#define C3   131
+#define F3   175
+#define F3s  185
+#define G3   196
+#define Bb3  233
+#define C4   262
+
+// Chacarera del olvido (Si menor)
+#define A3s  233
+#define C4s  277
+#define D4   294
+#define A4s  466
+#define C5s  554
+#define A5s  932
+#define D6   1175
+#define C3s  139
 
 typedef struct { uint16_t hz; uint8_t dur; } Nota;   // duracion en 32avos
+#define UNIDAD_MS 60   // duracion de un 32avo (baja el numero para ir mas rapido)
 
 // LLAMADO A FUNCIONES
 void UART_init(unsigned int ubrr);
@@ -51,7 +94,7 @@ int main(void)
 	TCCR2B = 0; // Apagado inicialmente
 
 	UART_init(103);
-	UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1\r\n2 - Cancion 2\r\n3 - Cancion 3\r\n");
+	UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
 
 	while (1)
 	{
@@ -62,22 +105,22 @@ int main(void)
 
 			case '0':
 			piano();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1\r\n2 - Cancion 2\r\n3 - Cancion 3\r\n");
+			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
 			break;
 
 			case '1':
 			cancion1();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1\r\n2 - Cancion 2\r\n3 - Cancion 3\r\n");
+			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
 			break;
 
 			case '2':
 			cancion2();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1\r\n2 - Cancion 2\r\n3 - Cancion 3\r\n");
+			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
 			break;
 
 			case '3':
 			cancion3();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1\r\n2 - Cancion 2\r\n3 - Cancion 3\r\n");
+			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
 			break;
 
 			case '\r':
@@ -159,26 +202,70 @@ static const Nota tema[] PROGMEM = {
 	{E5,16}                                   // cierre
 };
 
-#define UNIDAD_MS 60   // duracion de un 32avo (baja el numero para ir mas rapido)
+// BAJO (buzzer 2) - armonizacion propia, duraciones en 32avos
+// Suma total = 404, igual que la melodia (anacrusa 4 + 12 compases de 32 + cierre 16)
+#define BAJO_I   {E3,8},{B3,8},{E3,8},{B3,8}      // Tonica (I)
+#define BAJO_V   {E3,8},{B3,8},{B2,8},{B3,8}      // Tonica -> Dominante (V)
+
+static const Nota bajo[] PROGMEM = {
+	{SIL,4},                                   // anacrusa
+	BAJO_I,                                    // c.1
+	BAJO_I,                                    // c.2
+	BAJO_V,                                    // c.3
+	BAJO_I,                                    // c.4
+	BAJO_I,                                    // c.5
+	BAJO_V,                                    // c.6
+	BAJO_I,                                    // c.7
+	BAJO_I,                                    // c.8
+	{A3,8},{E3,8},{B2,8},{B3,8},               // c.9
+	{B2,8},{B3,8},{E3,8},{B3,8},               // c.10
+	BAJO_I,                                    // c.11
+	{E3,8},{B3,8},{A3,8},{B2,8},               // c.12
+	{E3,16}                                    // cierre
+};
+
+// MOTOR DE REPRODUCCION (sirve para todas las canciones)
+static const Nota *bajo_p;     // tabla de bajo en uso
+static uint16_t    bajo_n;     // cantidad de notas del bajo
+static uint16_t    bajo_i;     // indice de la nota actual del bajo
+static uint16_t    bajo_ms;    // ms que le quedan a esa nota
+
+// Se llama una vez por cada ms de espera
+static void bajo_tick(void) {
+	if (bajo_ms == 0) {
+		if (bajo_i < bajo_n) {
+			Nota b;
+			memcpy_P(&b, &bajo_p[bajo_i++], sizeof(Nota));
+			sonar_frecuencia_buzzer2(b.hz);
+			bajo_ms = (uint16_t)b.dur * UNIDAD_MS;
+			} else {
+			sonar_frecuencia_buzzer2(0);   // se termino el bajo
+			return;
+		}
+	}
+	bajo_ms--;
+}
 
 // Espera ms milisegundos. Devuelve 1 si llego una 'q' por UART.
 static uint8_t esperar_ms(uint16_t ms) {
 	while (ms--) {
 		if ((UCSR0A & (1 << RXC0)) && UDR0 == 'q') return 1;
+		bajo_tick();
 		_delay_ms(1);
 	}
 	return 0;
 }
 
-void cancion1(void) {
-	UART_mandarPalabras("Cancion 1: La Primavera (Vivaldi). Envie 'q' para salir...\r\n");
+static void reproducir(const Nota *mel, uint16_t n_mel, const Nota *baj, uint16_t n_baj) {
+	bajo_p = baj;  bajo_n = n_baj;
+	bajo_i = 0;    bajo_ms = 0;
 
-	for (uint16_t i = 0; i < sizeof(tema) / sizeof(tema[0]); i++) {
+	for (uint16_t i = 0; i < n_mel; i++) {
 		Nota n;
-		memcpy_P(&n, &tema[i], sizeof(Nota));
+		memcpy_P(&n, &mel[i], sizeof(Nota));
 
 		uint16_t total = (uint16_t)n.dur * UNIDAD_MS;
-		uint16_t gap   = (n.dur >= 3) ? 12 : 0;   // silencio corto para separar notas repetidas
+		uint16_t gap   = (n.dur >= 2) ? 12 : 0;   // silencio corto entre notas repetidas
 
 		sonar_frecuencia_buzzer1(n.hz);
 		if (esperar_ms(total - gap)) goto salir;
@@ -189,14 +276,130 @@ void cancion1(void) {
 		}
 	}
 
-salir:
+	salir:
 	sonar_frecuencia_buzzer1(0);
 	sonar_frecuencia_buzzer2(0);
 	UART_mandarPalabras("Volviendo al menu principal...\r\n");
 }
-void cancion2(void) {}
-void cancion3(void) {}
 
+// Funcion de la cancion 1
+void cancion1(void) {
+	UART_mandarPalabras("Cancion 1: La Primavera (Vivaldi). Envie 'q' para salir...\r\n");
+	reproducir(tema, sizeof(tema) / sizeof(tema[0]),
+	bajo, sizeof(bajo) / sizeof(bajo[0]));
+}
+
+
+// CANCION 2: Tema de Mision Imposible (Lalo Schifrin)
+// 5/4, Sol menor. Con UNIDAD_MS = 60: corchea = 3, negra = 6, blanca = 12
+// Las notas ligadas estan sumadas en una sola.
+#define PICK(a, b)  {a,3},{b,3}                              // dos corcheas de arranque
+#define OST_A  {G3,6},{SIL,3},{G3,9},{Bb3,6},{C4,6}          // ostinato terminando en Bb-C
+#define OST_B  {G3,6},{SIL,3},{G3,9},{F3,6},{F3s,6}          // ostinato terminando en F-F#
+
+static const Nota mision_mel[] PROGMEM = {
+	{SIL,120},                          // c.1-4: entra solo el bajo
+	PICK(G5,G5),   {D5,24},             // c.5
+	PICK(G5,F5),   {Db5,24},            // c.6
+	PICK(G5,Eb5),  {C5,24},             // c.7
+	PICK(Bb4,C5),  {SIL,24},            // c.8
+	{SIL,60},                           // c.9-10
+	PICK(Bb4,G4),  {F5s,24},            // c.11
+	PICK(Bb4,G4),  {F5,24},             // c.12
+	PICK(Bb4,G4),  {E5,24},             // c.13
+	PICK(Eb5,D5),  {SIL,24},            // c.14
+	PICK(Eb5,C5),  {G4,24},             // c.15
+	PICK(Eb5,C5),  {F4s,24},            // c.16
+	PICK(Eb5,C5),  {F4,24},             // c.17
+	PICK(E4,F4),   {SIL,24},            // c.18
+	PICK(Bb4,G4),  {F5s,24},            // c.19
+	PICK(Bb4,G4),  {F5,24}              // c.20
+};
+
+static const Nota mision_bajo[] PROGMEM = {
+	OST_A, OST_B, OST_A, OST_B,         // c.1-4
+	OST_A, OST_B, OST_A, OST_B,         // c.5-8
+	OST_A, OST_B, OST_A, OST_B,         // c.9-12
+	OST_A, OST_B,                       // c.13-14
+	{C3,18},{G3,6},{G2,6},              // c.15
+	{C3,18},{F3s,6},{F2s,6},            // c.16
+	{C3,18},{F3,6},{F2,6},              // c.17
+	{C3,18},{E3,6},{E2,6},              // c.18
+	{G3,18},{Bb3,6},{C4,6},             // c.19
+	{G3,18},{F3,6},{F3s,6}              // c.20
+};
+
+// Funcion de la cancion 2
+void cancion2(void) {
+	UART_mandarPalabras("Cancion 2: Mision Imposible. Envie 'q' para salir...\r\n");
+	reproducir(mision_mel,  sizeof(mision_mel)  / sizeof(mision_mel[0]),
+	mision_bajo, sizeof(mision_bajo) / sizeof(mision_bajo[0]));
+}
+
+
+// CANCION 3: Chacarera del olvido
+// 6/8, Si menor. Con UNIDAD_MS = 60: corchea = 3, negra = 6, negra con puntillo = 9
+// Las notas ligadas estan sumadas en una sola.
+#define TUP(a, b, c, d)  {a,2},{b,2},{c,2},{d,3}     // cuatrillo en el tiempo de 3 corcheas
+
+#define BAJO_BM  {B2,6},{F3s,3},{B2,3},{F3s,6}       // Si menor
+#define BAJO_FS  {F2s,6},{C3s,3},{F2s,3},{C3s,6}     // Fa# (dominante)
+#define BAJO_EM  {E3,6},{B2,3},{E3,3},{B2,6}         // Mi menor
+
+static const Nota chacarera_mel[] PROGMEM = {
+	{SIL,9}, TUP(B4,C5s,D5,E5),                      // c.1
+	{F5s,9},{E5,6},{F5s,3},                          // c.2
+	{B4,9},{SIL,3},{D6,3},{D6,6},                    // c.3 (Re ligado al c.4)
+	{C6s,6},{B5,6},{A5s,3},                          // c.4
+	{B5,9}, TUP(B3,C4s,D4,E4),                       // c.5
+	{F4s,9},{E4,6},{F4s,3},                          // c.6
+	{B3,9},{SIL,3},{D6,3},{D6,6},                    // c.7
+	{C6s,6},{B5,6},{A5s,3},                          // c.8
+	{B5,18},                                         // c.9
+	{F5s,6},{B4,3},{C5s,6},{B4,3},                   // c.10
+	{A4s,9},{SIL,9},                                 // c.11
+	{E5,3},{E5,6},{D5,3},{E5,6},                     // c.12
+	{F5s,9},{SIL,9},                                 // c.13
+	{E5,3},{E5,6},{D5,3},{E5,3},{F5s,6},             // c.14 (Fa# ligado al c.15)
+	{F5s,6},{B4,6},{B4,3},                           // c.15
+	{F5s,9},{E5,3},{F5s,6},                          // c.16
+	{B4,9}, TUP(B4,C5s,D5,E5),                       // c.17
+	{F5s,9},{E5,6},{F5s,3},                          // c.18
+	{B4,9},{SIL,3},{D5,3},{D5,6},                    // c.19
+	{C5s,6}, TUP(C5s,B4,B4,A4s),                     // c.20
+	{B4,9}, TUP(B3,C4s,D4,E4),                       // c.21
+	{F4s,9},{E4,6},{F4s,3},                          // c.22
+	{B3,9},{SIL,3},{D6,3},{D6,6},                    // c.23
+	{C6s,6}, TUP(C6s,B5,B5,A5s),                     // c.24
+	{B5,18},                                         // c.25
+	{F4s,6},{B3,3},{C4s,6},{B3,3},                   // c.26
+	{A3s,9},{SIL,9},                                 // c.27
+	{E4,3},{E4,6},{D4,3},{E4,6},                     // c.28
+	{F4s,9},{SIL,9},                                 // c.29
+	{E4,3},{E4,6},{D4,3},{E4,3},{F4s,6},             // c.30
+	{F4s,6},{B3,6},{B3,3},                           // c.31
+	{F4s,9},{E4,3},{F4s,6},                          // c.32
+	{B3,18}                                          // cierre (agregado por mi)
+};
+
+static const Nota chacarera_bajo[] PROGMEM = {
+	BAJO_BM, BAJO_BM, BAJO_BM, BAJO_FS,              // c.1-4
+	BAJO_BM, BAJO_BM, BAJO_BM, BAJO_FS,              // c.5-8
+	BAJO_BM, BAJO_BM, BAJO_FS, BAJO_EM,              // c.9-12
+	BAJO_FS, BAJO_EM, BAJO_BM, BAJO_FS,              // c.13-16
+	BAJO_BM, BAJO_BM, BAJO_BM, BAJO_FS,              // c.17-20
+	BAJO_BM, BAJO_BM, BAJO_BM, BAJO_FS,              // c.21-24
+	BAJO_BM, BAJO_BM, BAJO_FS, BAJO_EM,              // c.25-28
+	BAJO_FS, BAJO_EM, BAJO_BM, BAJO_FS,              // c.29-32
+	{B2,18}                                          // cierre
+};
+
+// Funcion de la cancion 2
+void cancion3(void) {
+	UART_mandarPalabras("Cancion 3: Chacarera del olvido. Envie 'q' para salir...\r\n");
+	reproducir(chacarera_mel,  sizeof(chacarera_mel)  / sizeof(chacarera_mel[0]),
+	chacarera_bajo, sizeof(chacarera_bajo) / sizeof(chacarera_bajo[0]));
+}
 
 // BUZZER 1 (Pin PB2): Usa Timer 1 (16 bits) con prescaler fijo de 64
 void sonar_frecuencia_buzzer1(uint16_t hz) {
@@ -218,7 +421,6 @@ void sonar_frecuencia_buzzer1(uint16_t hz) {
 	TCCR1A |= (1 << COM1B0);
 	TCCR1B |= (1 << CS11) | (1 << CS10); // prescaler 64
 }
-
 
 // BUZZER 2 (Pin PB3): Usa Timer 2 (8 bits) con PRESCALER DINAMICO
 void sonar_frecuencia_buzzer2(uint16_t hz) {
@@ -259,7 +461,6 @@ void sonar_frecuencia_buzzer2(uint16_t hz) {
 	TCNT2 = 0;
 	TCCR2A |= (1 << COM2A0);              // reconecta pin
 }
-
 
 // Inicializacion de comunicacion UART
 void UART_init(unsigned int ubrr) {
