@@ -57,8 +57,11 @@
 #define D6   1175
 #define C3s  139
 
-typedef struct { uint16_t hz; uint8_t dur; } Nota;   // duracion en 32avos
-#define UNIDAD_MS 60   // duracion de un 32avo (baja el numero para ir mas rapido)
+typedef struct { uint16_t hz; uint8_t dur; } Nota;   // duracion en unidades de UNIDAD_MS
+#define UNIDAD_MS 60   // 1 unidad = 60 ms (baja el numero para ir mas rapido)
+
+// LCD 16x2 con modulo I2C 
+#define LCD_ADDR  0x27   // direccion I2C de 7 bits 
 
 // LLAMADO A FUNCIONES
 void UART_init(unsigned int ubrr);
@@ -70,7 +73,16 @@ void UART_mandarPalabras(const char *str);
 void sonar_frecuencia_buzzer1(uint16_t hz); // Controla PB2 (Timer 1)
 void sonar_frecuencia_buzzer2(uint16_t hz); // Controla PB3 (Timer 2)
 
+// LCD
+void lcd_init(void);
+void lcd_clear(void);
+void lcd_set_cursor(uint8_t col, uint8_t fila);
+void lcd_print(const char *s);
+void lcd_titulo(const char *linea1, const char *linea2);
+void lcd_mostrar_nota(uint8_t col, uint8_t fila, uint16_t hz);
+
 // Modos
+void mostrar_menu(void);
 void piano(void);
 void cancion1(void);
 void cancion2(void);
@@ -94,33 +106,33 @@ int main(void)
 	TCCR2B = 0; // Apagado inicialmente
 
 	UART_init(103);
-	UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
+	lcd_init();
+	mostrar_menu();
 
 	while (1)
 	{
 		// Seleccion de modos
-		
 		char recibido = UART_recibir();
 		switch (recibido) {
 
 			case '0':
 			piano();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
+			mostrar_menu();
 			break;
 
 			case '1':
 			cancion1();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
+			mostrar_menu();
 			break;
 
 			case '2':
 			cancion2();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
+			mostrar_menu();
 			break;
 
 			case '3':
 			cancion3();
-			UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
+			mostrar_menu();
 			break;
 
 			case '\r':
@@ -136,11 +148,21 @@ int main(void)
 }
 
 
+// MENU (por UART y por LCD)
+void mostrar_menu(void) {
+	UART_mandarPalabras("Selecciona el modo de operacion!\r\n0 - Piano\r\n1 - Cancion 1: Primavera de Vivaldi\r\n2 - Cancion 2: Mision Imposible\r\n3 - Cancion 3: Chacarera del olvido\r\n");
+	lcd_titulo("0:Piano 1:Vivald", "2:MisImp 3:Chac");
+}
+
+
 // MODO PIANO
 void piano(void) {
 	static const uint16_t notas[8] = {262, 294, 330, 349, 392, 440, 494, 523}; //NOTAS
 
 	UART_mandarPalabras("Modo Piano Activo. Presione botones. Envie 'q' por UART para salir...\r\n");
+	lcd_titulo("Modo Piano", "Ag:---  Gr:---");
+
+	uint16_t ult_agudo = 0, ult_grave = 0;   // ultimas notas dibujadas en el LCD
 
 	while (1) {
 
@@ -164,6 +186,10 @@ void piano(void) {
 
 		sonar_frecuencia_buzzer1(agudo); // melodia
 		sonar_frecuencia_buzzer2(grave); // bajo
+
+		// LCD: solo se redibuja cuando cambia la nota
+		if (agudo != ult_agudo) { lcd_mostrar_nota(3, 1, agudo);  ult_agudo = agudo; }
+		if (grave != ult_grave) { lcd_mostrar_nota(11, 1, grave); ult_grave = grave; }
 
 		_delay_ms(20); // Delay debouncer basico
 	}
@@ -237,8 +263,9 @@ static void bajo_tick(void) {
 			Nota b;
 			memcpy_P(&b, &bajo_p[bajo_i++], sizeof(Nota));
 			sonar_frecuencia_buzzer2(b.hz);
+			
 			bajo_ms = (uint16_t)b.dur * UNIDAD_MS;
-			} else {
+		} else {
 			sonar_frecuencia_buzzer2(0);   // se termino el bajo
 			return;
 		}
@@ -268,6 +295,7 @@ static void reproducir(const Nota *mel, uint16_t n_mel, const Nota *baj, uint16_
 		uint16_t gap   = (n.dur >= 2) ? 12 : 0;   // silencio corto entre notas repetidas
 
 		sonar_frecuencia_buzzer1(n.hz);
+
 		if (esperar_ms(total - gap)) goto salir;
 
 		if (gap) {
@@ -285,6 +313,7 @@ static void reproducir(const Nota *mel, uint16_t n_mel, const Nota *baj, uint16_
 // Funcion de la cancion 1
 void cancion1(void) {
 	UART_mandarPalabras("Cancion 1: La Primavera (Vivaldi). Envie 'q' para salir...\r\n");
+	lcd_titulo("La Primavera", "Reproduciendo...");
 	reproducir(tema, sizeof(tema) / sizeof(tema[0]),
 	bajo, sizeof(bajo) / sizeof(bajo[0]));
 }
@@ -332,6 +361,7 @@ static const Nota mision_bajo[] PROGMEM = {
 // Funcion de la cancion 2
 void cancion2(void) {
 	UART_mandarPalabras("Cancion 2: Mision Imposible. Envie 'q' para salir...\r\n");
+	lcd_titulo("Mision Imposible", "Reproduciendo...");
 	reproducir(mision_mel,  sizeof(mision_mel)  / sizeof(mision_mel[0]),
 	mision_bajo, sizeof(mision_bajo) / sizeof(mision_bajo[0]));
 }
@@ -394,9 +424,10 @@ static const Nota chacarera_bajo[] PROGMEM = {
 	{B2,18}                                          // cierre
 };
 
-// Funcion de la cancion 2
+// Funcion de la cancion 3
 void cancion3(void) {
 	UART_mandarPalabras("Cancion 3: Chacarera del olvido. Envie 'q' para salir...\r\n");
+	lcd_titulo("Chacarera Olvido", "Reproduciendo...");
 	reproducir(chacarera_mel,  sizeof(chacarera_mel)  / sizeof(chacarera_mel[0]),
 	chacarera_bajo, sizeof(chacarera_bajo) / sizeof(chacarera_bajo[0]));
 }
@@ -487,4 +518,151 @@ void UART_mandarPalabras(const char *str) {
 	while (*str) {
 		UART_mandarLetra(*str++);
 	}
+}
+
+
+// LCD PARA I2C
+#define LCD_RS  0x01
+#define LCD_E   0x04
+#define LCD_BL  0x08
+
+// modo maestro
+static void twi_init(void) {
+	TWSR = 0;        // prescaler del TWI = 1
+	TWBR = 72;       // SCL = F_CPU / (16 + 2*TWBR) = 16 MHz / 160 = 100 kHz
+}
+
+static void twi_start(uint8_t direccion_escritura) {
+	TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);   // condicion START
+	while (!(TWCR & (1 << TWINT)));
+	TWDR = direccion_escritura;                          // direccion + bit W
+	TWCR = (1 << TWINT) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT)));
+}
+
+static void twi_write(uint8_t dato) {
+	TWDR = dato;
+	TWCR = (1 << TWINT) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT)));
+}
+
+static void twi_stop(void) {
+	TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO);   // condicion STOP
+}
+
+// inicializacion
+static void lcd_nibble(uint8_t nibble) {
+	uint8_t d = ((nibble << 4) & 0xF0) | LCD_BL;
+	twi_start(LCD_ADDR << 1);
+	twi_write(d | LCD_E);    // E = 1
+	twi_write(d);            // E = 0 (el LCD lee el dato en este flanco de bajada)
+	twi_stop();
+}
+
+// Manda un byte completo: dos nibbles, cada uno con su pulso de E.
+// rs = 0 -> comando, rs = LCD_RS -> caracter. Todo en UNA sola transaccion I2C.
+static void lcd_enviar(uint8_t dato, uint8_t rs) {
+	uint8_t alto = (dato & 0xF0)        | LCD_BL | rs;
+	uint8_t bajo = ((dato << 4) & 0xF0) | LCD_BL | rs;
+	twi_start(LCD_ADDR << 1);
+	twi_write(alto | LCD_E);
+	twi_write(alto);
+	twi_write(bajo | LCD_E);
+	twi_write(bajo);
+	twi_stop();
+}
+
+static void lcd_cmd(uint8_t cmd) {
+	lcd_enviar(cmd, 0);
+}
+
+void lcd_clear(void) {
+	lcd_cmd(0x01);
+	_delay_ms(2);            // "clear" es lento (~1,5 ms)
+}
+
+void lcd_init(void) {
+	twi_init();
+	_delay_ms(50);           // el LCD necesita tiempo para arrancar
+
+	// Secuencia de arranque del HD44780 para forzar el modo de 4 bits
+	lcd_nibble(0x03);  _delay_ms(5);
+	lcd_nibble(0x03);  _delay_us(150);
+	lcd_nibble(0x03);  _delay_us(150);
+	lcd_nibble(0x02);  _delay_us(150);   // pasa a 4 bits
+
+	lcd_cmd(0x28);           // 4 bits, 2 lineas, fuente 5x8
+	lcd_cmd(0x0C);           // display encendido, sin cursor
+	lcd_cmd(0x06);           // el cursor avanza hacia la derecha
+	lcd_clear();
+}
+
+void lcd_set_cursor(uint8_t col, uint8_t fila) {
+	// La linea 1 empieza en la direccion 0x00 y la linea 2 en 0x40
+	lcd_cmd(0x80 | ((fila ? 0x40 : 0x00) + col));
+}
+
+void lcd_print(const char *s) {
+	while (*s) {
+		lcd_enviar((uint8_t)*s++, LCD_RS);
+	}
+}
+
+// Borra y escribe las dos lineas
+void lcd_titulo(const char *linea1, const char *linea2) {
+	lcd_clear();
+	lcd_set_cursor(0, 0);
+	lcd_print(linea1);
+	lcd_set_cursor(0, 1);
+	lcd_print(linea2);
+}
+
+// Tabla de Do2 a Do7 (61 notas, afinacion temperada). El indice 0 es Do2.
+#define NOTAS_TABLA 61
+static const uint16_t tabla_hz[NOTAS_TABLA] PROGMEM = {
+	262, 294, 330, 349, 392, 440, 494, 523
+};
+
+static const char nombres_nota[] = "CDEFGABC";
+
+static void nota_a_texto(uint16_t hz, char *out) {
+
+	if (hz == 0) {
+		out[0] = '-';
+		out[1] = '-';
+		out[2] = '-';
+		out[3] = '\0';
+		return;
+	}
+
+	uint8_t mejor = 0;
+	uint16_t dmin = 0xFFFF;
+
+	for (uint8_t i = 0; i < NOTAS_TABLA; i++) {
+
+		uint16_t f = pgm_read_word(&tabla_hz[i]);
+		uint16_t d = (f > hz) ? (f - hz) : (hz - f);
+
+		if (d < dmin) {
+			dmin = d;
+			mejor = i;
+		}
+	}
+
+	out[0] = nombres_nota[mejor];
+
+	if (mejor == 7)
+	out[1] = '5';
+	else
+	out[1] = '4';
+
+	out[2] = ' ';
+	out[3] = '\0';
+}
+
+void lcd_mostrar_nota(uint8_t col, uint8_t fila, uint16_t hz) {
+	char texto[4];
+	nota_a_texto(hz, texto);
+	lcd_set_cursor(col, fila);
+	lcd_print(texto);
 }
