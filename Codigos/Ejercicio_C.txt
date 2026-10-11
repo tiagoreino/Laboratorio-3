@@ -101,3 +101,162 @@ void ws2812_set_display_leds(uint8_t r, uint8_t g, uint8_t b) {
 	}
 	ws2812_show(); // Refrescaa la matriz
 }
+
+// Servomotor ( Pin 11, PWM)
+
+void Servo_init(void) {
+	DDRB |= (1 << PB5); // Pin 11 como salida
+	
+	// Modo Fast PWM con TOP en ICR1 (Modo 14)
+	TCCR1A = (1 << COM1A1) | (1 << WGM11);
+	TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11); // Prescaler de 8
+	
+	ICR1 = 39999; // TOP para frecuencia de PWM a 50 Hz (período de 20 ms)
+}
+
+// Mapea y mueve el servomotor en el rango de 0° a 90°
+void Servo_set_angle(uint8_t angle) {
+	if (angle > 90) angle = 90; // Límite de seguridad
+	
+	// Convierte grados (0° a 90°) a ancho de pulso PWM en ticks del Timer 1
+	uint16_t pulse = 2000 + ((uint32_t)angle * 2000) / 90;
+	OCR1A = pulse;
+}
+
+
+// Comunicación UART 0 (9600 Baudios)
+void UART0_init(unsigned int ubrr) {
+	UBRR0H = (unsigned char)(ubrr >> 8);
+	UBRR0L = (unsigned char)ubrr;
+	UCSR0B = (1 << TXEN0); // Habilitar Transmisión TX
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); // 8 bits de datos, 1 bit de parada
+}
+
+void UART0_send_string(const char* str) {
+	while (*str) {
+		while (!(UCSR0A & (1 << UDRE0))); // Esperar búfer libre
+		UDR0 = *str++;
+	}
+}
+
+// Convertidor  análogo - digital (ADC A0)
+void ADC_init(void) {
+	ADMUX = (1 << REFS0); // Tensión referencia (5V)
+	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); // Prescaler de 128
+}
+
+uint16_t ADC_read(uint8_t channel) {
+	ADCSRB &= ~(1 << MUX5);
+	ADMUX = (ADMUX & 0xF0) | (channel & 0x07); // Seleccionar canal ADC (A0)
+	ADCSRA |= (1 << ADSC); // Iniciar conversión
+	while (ADCSRA & (1 << ADSC)); // Esperar a que termine conversión
+	return ADC;
+}
+
+// Pantalla LCD I2C
+#define LCD_I2C_ADDR 0x27 // Dirección esclava de
+#define LCD_BACKLIGHT 0x08 // Pin retroiluminación activado
+#define ENABLE 0x04        // Bit EN
+#define RS_PIN 0x01        // Bit RS
+
+// Inicialización del módulo de hardware I2C/TWI
+void TWI_init(void) {
+	TWSR = 0x00; // Prescaler = 1
+	TWBR = 72;   // Frecuencia SCL = 100 kHz a F_CPU = 16 MHz
+}
+
+void TWI_start(void) {
+	TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT)));
+}
+
+void TWI_stop(void) {
+	TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+}
+
+void TWI_write(uint8_t data) {
+	TWDR = data;
+	TWCR = (1 << TWINT) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT)));
+}
+
+// Envía byte de datos al expansor de puertos PCF8574
+void LCD_I2C_write_pcf(uint8_t data) {
+	TWI_start();
+	TWI_write((LCD_I2C_ADDR << 1)); // Dirección I2C + bit de Escritura (0)
+	TWI_write(data | LCD_BACKLIGHT);
+	TWI_stop();
+}
+
+// Pulso en EN de LCD, procesa datos
+void LCD_I2C_pulse(uint8_t data) {
+	LCD_I2C_write_pcf(data | ENABLE);
+	_delay_us(1);
+	LCD_I2C_write_pcf(data & ~ENABLE);
+	_delay_us(50);
+}
+
+// Envía byte dividie en 2 (4 bits cada uno)
+void LCD_I2C_send(uint8_t value, uint8_t mode) {
+	uint8_t highnib = value & 0xF0;
+	uint8_t lownib = (value << 4) & 0xF0;
+	
+	LCD_I2C_write_pcf(highnib | mode);
+	LCD_I2C_pulse(highnib | mode);
+	
+	LCD_I2C_write_pcf(lownib | mode);
+	LCD_I2C_pulse(lownib | mode);
+}
+
+// Envío comando a LCD I2C (RS = 0)
+void LCD_command(uint8_t cmd) {
+	LCD_I2C_send(cmd, 0);
+	_delay_ms(2);
+}
+
+// Envío carácter texto a LCD I2C (RS = 1)
+void LCD_char(uint8_t data) {
+	LCD_I2C_send(data, RS_PIN);
+	_delay_ms(2);
+}
+
+// Inicialización  pantalla LCD sobre I2C (modo 4 bits)
+void LCD_init(void) {
+	TWI_init();
+	_delay_ms(50);
+	
+	// Secuencia de reinicio en 4 bits para el PCF8574
+	LCD_I2C_write_pcf(0x30);
+	LCD_I2C_pulse(0x30);
+	_delay_ms(5);
+	
+	LCD_I2C_pulse(0x30);
+	_delay_us(150);
+	
+	LCD_I2C_pulse(0x30);
+	LCD_I2C_pulse(0x20); // Fijar a modo de comunicación de 4 bits
+
+	LCD_command(0x28); // 2 líneas, formato caracteres 5x8
+	LCD_command(0x0C); // Display encendido, sin cursor
+	LCD_command(0x01); // Limpiar pantalla
+	_delay_ms(5);
+}
+
+void LCD_string(const char* str) {
+	while (*str) LCD_char(*str++);
+}
+
+void LCD_set_cursor(uint8_t row, uint8_t col) {
+	uint8_t pos = (row == 0) ? (0x80 + col) : (0xC0 + col);
+	LCD_command(pos);
+}
+
+
+// Patrón referencia
+typedef struct {
+	const char* nombre;
+	uint16_t r, g, b; // Valores ADC calibración
+	uint16_t m_r, m_g, m_b; // Tolerancia individual
+	uint8_t angulo_servo;  // Grados servomotor
+	uint8_t led_r, led_g, led_b; // Color matriz WS2812
+} ColorRef;
