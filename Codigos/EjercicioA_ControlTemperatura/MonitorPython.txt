@@ -1,0 +1,426 @@
+"""Monitor del Problema A. Ejecutar con Python 3.
+
+Enviar punto medio escribe M numero seguido de CR/LF; rango permitido 7..70 C.
+Finalizar y graficar (o cerrar con X) termina la captura, guarda los datos
+y muestra las graficas. No detiene ni modifica la simulacion en PICSimLab.
+Los archivos se crean junto a este script, en una carpeta nueva por captura.
+El eje temporal utiliza el reloj del ATmega, no el reloj de la computadora.
+Si el ATmega reinicia, comienza otra sesion y genera otra figura.
+"""
+
+import csv
+from datetime import datetime
+from pathlib import Path
+import queue
+import threading
+import time
+import tkinter as tk
+from tkinter import messagebox, simpledialog
+
+BAUD = 9600
+ACCIONES = {"CALENTANDO", "IDEAL", "V_BAJA", "V_MEDIA", "V_ALTA",
+            "CALOR", "BAJO", "MEDIO", "ALTO"}
+CAMPOS = ["sesion", "tiempo_sim_s", "tipo", "ms", "adc", "temp_C", "accion",
+          "calefactor", "pwm", "centro_C", "ideal_min_C", "ideal_max_C"]
+
+
+# ==========================================================
+# EXTRAER LAS DIEZ COLUMNAS QUE ENVIA EL PROGRAMA C
+# ==========================================================
+def interpretar_linea(linea):
+    """Devuelve un diccionario; ignora ayuda y rechaza registros incompletos."""
+    linea = linea.strip()
+    if not linea or linea.startswith("#"):
+        return None
+    partes = [parte.strip() for parte in linea.split(",")]
+    if partes[0] not in ("DATA", "EVENT", "STATUS"):
+        return None
+    if len(partes) != 10:
+        raise ValueError("Se esperaban diez columnas CSV")
+    try:
+        registro = {
+            "tipo": partes[0], "ms": int(partes[1]), "adc": int(partes[2]),
+            "temp_C": int(partes[3]), "accion": partes[4],
+            "calefactor": int(partes[5]), "pwm": int(partes[6]),
+            "centro_C": int(partes[7]), "ideal_min_C": int(partes[8]),
+            "ideal_max_C": int(partes[9]),
+        }
+    except ValueError as error:
+        raise ValueError("Hay un campo numerico invalido") from error
+    if not (0 <= registro["ms"] < 2**32 and 0 <= registro["adc"] <= 1023
+            and 0 <= registro["temp_C"] <= 100 and registro["accion"] in ACCIONES
+            and registro["calefactor"] in (0, 1) and 0 <= registro["pwm"] <= 255
+            and 7 <= registro["centro_C"] <= 70
+            and registro["ideal_min_C"] == registro["centro_C"] - 6
+            and registro["ideal_max_C"] == registro["centro_C"] + 6):
+        raise ValueError("Registro fuera de rango o limites ideales incoherentes")
+    return registro
+
+
+# ==========================================================
+# TIEMPO DE SIMULACION: REINICIOS Y DESBORDAMIENTO DE 32 BITS
+# ==========================================================
+class RelojSimulacion:
+    def __init__(self):
+        self.sesion = 1
+        self.anterior = None
+        self.vueltas = 0
+
+    def agregar(self, registro):
+        """Convierte ms a segundos y separa las capturas tras un reinicio."""
+        actual = registro["ms"]
+        if self.anterior is not None and actual < self.anterior:
+            if self.anterior - actual > 2**31:
+                self.vueltas += 2**32  # vuelta del contador, aproximadamente 49 dias
+            else:
+                self.sesion += 1
+                self.vueltas = 0
+        self.anterior = actual
+        registro["sesion"] = self.sesion
+        registro["tiempo_sim_s"] = (self.vueltas + actual) / 1000.0
+        return registro
+
+
+# ==========================================================
+# RECEPCION: EL HILO SOLO LEE; TKINTER SE ACTUALIZA DESDE MAIN
+# ==========================================================
+def recibir_datos(puerto, mensajes, detener):
+    """Conserva las lineas parciales aunque una lectura serial venza por timeout."""
+    pendiente = bytearray()
+    try:
+        while not detener.is_set():
+            bloque = puerto.read(max(1, min(puerto.in_waiting, 4096)))
+            pendiente.extend(bloque)
+            while b"\n" in pendiente:
+                linea, _, pendiente = pendiente.partition(b"\n")
+                mensajes.put(("linea", linea.decode("utf-8", errors="replace").strip()))
+            # Proteccion frente a una entrada sin fin de linea.
+            if len(pendiente) > 4096:
+                pendiente.clear()
+                mensajes.put(("aviso", "Linea demasiado larga: descartada"))
+        if pendiente:
+            mensajes.put(("aviso", "Fragmento sin fin de linea al finalizar: no registrado"))
+    except Exception as error:
+        mensajes.put(("error", f"Error de lectura serial: {error}"))
+    finally:
+        mensajes.put(("fin", None))
+
+
+# ==========================================================
+# COMANDO DE PUNTO MEDIO: VALIDAR Y TERMINAR CON CR/LF
+# ==========================================================
+def comando_punto_medio(texto):
+    """Construye exactamente el comando que reconoce UART_procesar_comando."""
+    try:
+        valor = int(texto.strip())
+    except ValueError as error:
+        raise ValueError("Ingrese un punto medio entero de 7 a 70 °C") from error
+    if not 7 <= valor <= 70:
+        raise ValueError("El punto medio debe estar entre 7 y 70 °C")
+    return valor, f"M {valor}\r\n".encode("ascii")
+
+
+# ==========================================================
+# GRAFICAS AL FINALIZAR LA CAPTURA
+# ==========================================================
+def crear_graficas(registros, carpeta):
+    """Una figura por sesion; EVENT cambia acciones/banda, no mide temperatura."""
+    import matplotlib.pyplot as plt
+    figuras = []
+    for sesion in sorted({registro["sesion"] for registro in registros}):
+        datos = [r for r in registros if r["sesion"] == sesion]
+        muestras = [r for r in datos if r["tipo"] == "DATA"]
+        if not muestras:
+            continue
+        # STATUS puede aportar el estado inicial; los valores repetidos son validos.
+        tiempos = [r["tiempo_sim_s"] for r in datos]
+        figura, ejes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+        ejes[0].plot([r["tiempo_sim_s"] for r in muestras],
+                     [r["temp_C"] for r in muestras], "o-", color="tab:red",
+                     label="Temperatura medida")
+        ejes[0].step(tiempos, [r["centro_C"] for r in datos], where="post",
+                     color="tab:blue", linestyle="--", label="Punto medio")
+        minimo = [r["ideal_min_C"] for r in datos]
+        maximo = [r["ideal_max_C"] for r in datos]
+        ejes[0].fill_between(tiempos, minimo, maximo, step="post", color="tab:green",
+                             alpha=0.18, label="Rango ideal")
+        ejes[0].step(tiempos, minimo, where="post", color="tab:green", linewidth=0.8)
+        ejes[0].step(tiempos, maximo, where="post", color="tab:green", linewidth=0.8)
+        ejes[0].set_ylabel("Temperatura [°C]")
+        ejes[0].legend(loc="best")
+
+        ejes[1].step(tiempos, [r["calefactor"] for r in datos], where="post",
+                     color="tab:orange", label="Calefactor")
+        ejes[1].set_yticks([0, 1], ["Apagado", "Encendido"])
+        ejes[1].set_ylim(-0.15, 1.15)
+        ejes[1].set_ylabel("Calefactor")
+
+        ejes[2].step(tiempos, [r["pwm"] for r in datos], where="post",
+                     color="tab:purple", label="Ventilador PWM")
+        # Mantiene 254 como velocidad alta tal como aparece en el C del usuario.
+        ejes[2].set_yticks([0, 100, 170, 254], ["0 · apagado", "100 · baja",
+                                                "170 · media", "254 · alta"])
+        ejes[2].set_ylim(-10, 265)
+        ejes[2].set_ylabel("PWM [0–255]")
+        ejes[2].set_xlabel("Tiempo de simulación desde el arranque del ATmega [s]")
+        for eje in ejes:
+            eje.grid(True, alpha=0.3)
+        figura.suptitle(f"Problema A · Control de temperatura · Sesión {sesion}")
+        figura.tight_layout()
+        ruta = Path(carpeta) / f"grafica_temperatura_sesion_{sesion}.png"
+        figura.savefig(ruta, dpi=200, bbox_inches="tight")
+        figuras.append(figura)
+    return figuras
+
+
+# ==========================================================
+# INTERFAZ, GUARDADO Y FINALIZACION
+# ==========================================================
+class MonitorTemperatura:
+    def __init__(self, ventana, puerto, carpeta):
+        self.ventana = ventana
+        self.puerto = puerto
+        self.carpeta = Path(carpeta)
+        self.mensajes = queue.Queue()
+        self.detener = threading.Event()
+        self.reloj = RelojSimulacion()
+        self.registros = []
+        self.finalizando = False
+        self.terminado = False
+        self.pendiente = None
+        self.limite_confirmacion = 0
+
+        self.archivo = (self.carpeta / "datos_temperatura.csv").open(
+            "w", newline="", encoding="utf-8")
+        self.csv = csv.DictWriter(self.archivo, fieldnames=CAMPOS)
+        self.csv.writeheader()
+        self.archivo.flush()
+        self.serial_txt = (self.carpeta / "monitor_serial.txt").open(
+            "w", encoding="utf-8", buffering=1)
+
+        ventana.title("Problema A · Monitor de temperatura")
+        ventana.geometry("960x650")
+        tk.Label(ventana, text="CONTROL DE TEMPERATURA", font=("Arial", 16, "bold")).pack(pady=12)
+        tk.Label(ventana, text=f"Puerto: {puerto.port}    Baud: {BAUD}    Muestreo: 5 s").pack()
+
+        frame = tk.Frame(ventana)
+        frame.pack(pady=12)
+        tk.Label(frame, text="Nuevo punto medio [°C] (7–70):").pack(side=tk.LEFT)
+        self.entrada = tk.Entry(frame, width=8)
+        self.entrada.insert(0, "22")
+        self.entrada.pack(side=tk.LEFT, padx=8)
+        self.boton_enviar = tk.Button(frame, text="Enviar punto medio", command=self.enviar_punto_medio)
+        self.boton_enviar.pack(side=tk.LEFT, padx=4)
+        self.boton_restaurar = tk.Button(frame, text="Restaurar 22 °C", command=self.restaurar)
+        self.boton_restaurar.pack(side=tk.LEFT, padx=4)
+        self.entrada.bind("<Return>", lambda evento: self.enviar_punto_medio())
+
+        self.estado = tk.StringVar(value="Esperando datos del ATmega…")
+        self.actual = tk.StringVar(value="Temperatura: —    Acción: —    Punto medio confirmado: —")
+        self.rango = tk.StringVar(value="Rango ideal: —    Calefactor: —    PWM: —    Tiempo: —")
+        tk.Label(ventana, textvariable=self.estado).pack(pady=4)
+        tk.Label(ventana, textvariable=self.actual, font=("Arial", 11, "bold")).pack(pady=5)
+        tk.Label(ventana, textvariable=self.rango).pack(pady=4)
+
+        frame_monitor = tk.Frame(ventana)
+        frame_monitor.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        scroll = tk.Scrollbar(frame_monitor)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.monitor = tk.Text(frame_monitor, state="disabled", font=("Consolas", 10),
+                               yscrollcommand=scroll.set, wrap="none")
+        self.monitor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.config(command=self.monitor.yview)
+        self.boton_finalizar = tk.Button(ventana, text="Finalizar captura y graficar",
+                                         command=self.finalizar)
+        self.boton_finalizar.pack(pady=10)
+        tk.Label(ventana, text=f"Archivos: {self.carpeta}", wraplength=920).pack(pady=(0, 8))
+        ventana.protocol("WM_DELETE_WINDOW", self.finalizar)
+        self.entrada.focus_set()
+
+        self.hilo = threading.Thread(target=recibir_datos,
+            args=(puerto, self.mensajes, self.detener), daemon=True)
+        self.hilo.start()
+        ventana.after(50, self.actualizar)
+        # Consultar el estado permite conocer el centro actual incluso si Python
+        # se conecta cuando PICSimLab ya esta ejecutando el programa.
+        self.enviar_comando(b"S\r\n")
+
+    def mostrar(self, texto):
+        """Se llama solo desde el hilo principal de Tkinter."""
+        self.serial_txt.write(texto + "\n")
+        self.monitor.config(state="normal")
+        self.monitor.insert(tk.END, texto + "\n")
+        # Limitar lo visible; el archivo conserva el registro completo.
+        if int(self.monitor.index("end-1c").split(".")[0]) > 2000:
+            self.monitor.delete("1.0", "201.0")
+        self.monitor.see(tk.END)
+        self.monitor.config(state="disabled")
+
+    def enviar_comando(self, comando):
+        if self.finalizando:
+            return False
+        try:
+            enviados = self.puerto.write(comando)
+            if enviados != len(comando):
+                raise OSError("No se envio el comando completo")
+        except Exception as error:
+            self.estado.set(f"Error de envío: {error}")
+            self.mostrar(f"> Error de envío: {error}")
+            return False
+        self.mostrar("> " + comando.decode("ascii").strip())
+        return True
+
+    def enviar_punto_medio(self):
+        if self.finalizando or self.pendiente is not None:
+            return
+        try:
+            valor, comando = comando_punto_medio(self.entrada.get())
+        except ValueError as error:
+            self.estado.set(str(error))
+            return
+        if self.enviar_comando(comando):
+            self.esperar_confirmacion(valor)
+
+    def restaurar(self):
+        if not self.finalizando and self.pendiente is None and self.enviar_comando(b"R\r\n"):
+            self.esperar_confirmacion(22)
+
+    def esperar_confirmacion(self, valor):
+        self.pendiente = valor
+        self.limite_confirmacion = time.monotonic() + 5
+        self.estado.set(f"Enviado: {valor} °C. Esperando confirmación del ATmega…")
+        self.boton_enviar.config(state="disabled")
+        self.boton_restaurar.config(state="disabled")
+
+    def liberar_envio(self):
+        self.pendiente = None
+        if not self.finalizando:
+            self.boton_enviar.config(state="normal")
+            self.boton_restaurar.config(state="normal")
+
+    def procesar_linea(self, linea):
+        self.mostrar(linea)
+        if linea.startswith("# ERROR"):
+            self.estado.set(linea.lstrip("# "))
+            self.liberar_envio()
+        try:
+            registro = interpretar_linea(linea)
+        except ValueError as error:
+            self.mostrar(f"# Python: registro descartado ({error})")
+            return
+        if registro is None:
+            return
+        registro = self.reloj.agregar(registro)
+        self.registros.append(registro)
+        self.csv.writerow(registro)
+        self.archivo.flush()
+        self.actual.set(f"Temperatura: {registro['temp_C']} °C    Acción: {registro['accion']}"
+                        f"    Punto medio confirmado: {registro['centro_C']} °C")
+        calefactor = "ENCENDIDO" if registro["calefactor"] else "APAGADO"
+        self.rango.set(f"Ideal: {registro['ideal_min_C']}–{registro['ideal_max_C']} °C"
+                       f"    Calefactor: {calefactor}    PWM: {registro['pwm']}/255"
+                       f"    Tiempo: {registro['tiempo_sim_s']:.3f} s · Sesión {registro['sesion']}")
+        if self.estado.get() == "Esperando datos del ATmega…":
+            self.estado.set("Recibiendo datos del ATmega.")
+        if self.pendiente is not None and registro["tipo"] == "EVENT":
+            if registro["centro_C"] == self.pendiente:
+                self.estado.set(f"Punto medio confirmado por el ATmega: {self.pendiente} °C")
+                self.liberar_envio()
+            else:
+                self.estado.set(f"ATmega informó otro centro: {registro['centro_C']} °C")
+                self.liberar_envio()
+
+    def actualizar(self):
+        """Vaciar la cola sin tocar Tkinter desde el hilo serial."""
+        # Un limite por vuelta mantiene la interfaz receptiva ante mucho texto.
+        for _ in range(300):
+            try:
+                tipo, contenido = self.mensajes.get_nowait()
+            except queue.Empty:
+                break
+            if tipo == "linea":
+                self.procesar_linea(contenido)
+            elif tipo == "error":
+                self.mostrar(contenido)
+                self.finalizar()
+            elif tipo == "aviso":
+                self.mostrar("# Python: " + contenido)
+            elif tipo == "fin":
+                self.terminado = True
+
+        if self.pendiente is not None and time.monotonic() >= self.limite_confirmacion:
+            self.estado.set("Sin confirmación. Comprueba la conexión y que PICSimLab esté ejecutándose.")
+            self.liberar_envio()
+        if self.finalizando and self.terminado and self.mensajes.empty():
+            self.hilo.join()
+            self.puerto.close()
+            self.archivo.close()
+            self.serial_txt.close()
+            self.ventana.destroy()
+            return
+        self.ventana.after(50, self.actualizar)
+
+    def finalizar(self):
+        """Finalizar una sola vez y procesar los registros que ya llegaron."""
+        if self.finalizando:
+            return
+        self.finalizando = True
+        self.detener.set()
+        self.estado.set("Finalizando captura y guardando datos…")
+        for boton in (self.boton_enviar, self.boton_restaurar, self.boton_finalizar):
+            boton.config(state="disabled")
+
+
+# ==========================================================
+# INICIO: SELECCIONAR COM; AL SALIR, GUARDAR Y MOSTRAR GRAFICAS
+# ==========================================================
+def main():
+    try:
+        import serial
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Faltan dependencias. Instala pyserial y matplotlib en tu Python.")
+        return
+    ventana = tk.Tk()
+    ventana.withdraw()
+    nombre = simpledialog.askstring("Puerto Serial",
+        "Ingrese el puerto COM que utilizará Python.\nEjemplo: COM11", parent=ventana)
+    if nombre is None:
+        ventana.destroy()
+        return
+    nombre = nombre.strip()
+    if nombre.lower().startswith("com"):
+        nombre = nombre.upper()
+    if not nombre:
+        messagebox.showerror("Puerto", "Debe ingresar un puerto", parent=ventana)
+        ventana.destroy()
+        return
+    puerto = None
+    try:
+        puerto = serial.Serial(port=nombre, baudrate=BAUD, bytesize=8,
+            parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
+            timeout=0.2, write_timeout=0.5)
+        carpeta = Path(__file__).resolve().parent / "capturas_temperatura" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        carpeta.mkdir(parents=True)
+        monitor = MonitorTemperatura(ventana, puerto, carpeta)
+    except Exception as error:
+        if puerto is not None:
+            puerto.close()
+        messagebox.showerror("Error", f"No se pudo iniciar el monitor:\n{error}", parent=ventana)
+        ventana.destroy()
+        return
+    ventana.deiconify()
+    ventana.mainloop()
+
+    # Puerto e hilos ya cerrados; matplotlib se ejecuta en el hilo principal.
+    figuras = crear_graficas(monitor.registros, carpeta)
+    print(f"Datos y monitor serial guardados en: {carpeta}")
+    if figuras:
+        print("Gráficas guardadas como PNG. Cierra las figuras para terminar.")
+        plt.show()
+    else:
+        print("No se recibieron filas DATA para graficar. Revisa la conexión serial.")
+
+
+if __name__ == "__main__":
+    main()

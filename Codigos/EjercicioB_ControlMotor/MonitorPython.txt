@@ -1,0 +1,982 @@
+# Uso de librerias para Interfaz Grafica
+
+import serial
+import threading
+import time
+import re
+import tkinter as tk
+from tkinter import simpledialog
+from tkinter import messagebox
+import matplotlib.pyplot as plt
+
+
+# ==========================================================
+# CONFIGURACION GENERAL
+# ==========================================================
+
+BAUD = 9600
+
+ARCHIVO = "datos_control.txt"
+
+NOMBRE_GRAFICA = "grafica_control.png"
+
+
+# ==========================================================
+# SELECCIONAR PUERTO SERIAL
+# ==========================================================
+#
+# Al iniciar el programa aparece una pequeña ventana
+# para ingresar el puerto.
+#
+# Ejemplo:
+#
+# COM11
+#
+# ==========================================================
+
+ventana_puerto = tk.Tk()
+
+ventana_puerto.withdraw()
+
+
+PUERTO = simpledialog.askstring(
+    "Puerto Serial",
+    "Ingrese el puerto COM que utilizará Python:\n\nEjemplo: COM11"
+)
+
+
+# ==========================================================
+# COMPROBAR QUE SE INGRESO UN PUERTO
+# ==========================================================
+
+if PUERTO is None:
+
+    print("No se seleccionó ningún puerto.")
+
+    ventana_puerto.destroy()
+
+    raise SystemExit
+
+
+# Eliminar espacios y convertir a mayúsculas
+#
+# Ejemplo:
+#
+# " com11 " --> "COM11"
+
+PUERTO = PUERTO.strip().upper()
+
+
+ventana_puerto.destroy()
+
+
+# ==========================================================
+# VARIABLES GLOBALES
+# ==========================================================
+
+ejecutando = True
+
+inicio = time.time()
+
+
+# ==========================================================
+# EXPRESION REGULAR
+# ==========================================================
+#
+# Formato esperado:
+#
+# POT: 45%   LDR: 60%   SP: 50%
+# ERROR: -10%   PWM: 25   SENTIDO: IZQUIERDA
+#
+# ==========================================================
+
+patron = re.compile(
+    r"POT:\s*(\d+)%\s*"
+    r"LDR:\s*(\d+)%\s*"
+    r"SP:\s*(\d+)%\s*"
+    r"ERROR:\s*(-?\d+)%\s*"
+    r"PWM:\s*(\d+)\s*"
+    r"SENTIDO:\s*(\w+)"
+)
+
+
+# ==========================================================
+# ABRIR PUERTO SERIAL
+# ==========================================================
+
+try:
+
+    puerto = serial.Serial(
+        port=PUERTO,
+        baudrate=BAUD,
+        bytesize=8,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        timeout=0.2
+    )
+
+
+    print("========================================")
+    print(" MONITOR SERIAL - CONTROL PROPORCIONAL")
+    print("========================================")
+
+    print()
+
+    print("Puerto:", PUERTO)
+
+    print("Baudrate:", BAUD)
+
+    print()
+
+    print("Conexión serial establecida correctamente.")
+
+    print()
+
+
+except serial.SerialException as error:
+
+    messagebox.showerror(
+        "Error",
+        f"No se pudo abrir {PUERTO}\n\n{error}"
+    )
+
+    raise SystemExit
+
+
+# ==========================================================
+# CREAR ARCHIVO TXT
+# ==========================================================
+#
+# Cada vez que ejecutamos el programa se crea uno nuevo.
+#
+# buffering=1 permite que el archivo se vaya actualizando
+# mientras el programa está funcionando.
+#
+# ==========================================================
+
+archivo = open(
+    ARCHIVO,
+    "w",
+    buffering=1
+)
+
+
+# ==========================================================
+# CABECERA DEL ARCHIVO
+# ==========================================================
+
+archivo.write(
+    "Tiempo\tPOT\tLDR\tSP\tERROR\tPWM\tSENTIDO\n"
+)
+
+
+# ==========================================================
+# CREAR VENTANA PRINCIPAL
+# ==========================================================
+
+ventana = tk.Tk()
+
+ventana.title(
+    "Control Serial ATmega328P"
+)
+
+ventana.geometry(
+    "800x520"
+)
+
+
+# ==========================================================
+# TITULO
+# ==========================================================
+
+titulo = tk.Label(
+    ventana,
+    text="CONTROL SERIAL",
+    font=("Arial", 16)
+)
+
+titulo.pack(
+    pady=15
+)
+
+
+# ==========================================================
+# MOSTRAR PUERTO ACTUAL
+# ==========================================================
+
+etiqueta_puerto = tk.Label(
+    ventana,
+    text=f"Puerto: {PUERTO}    Baud: {BAUD}"
+)
+
+etiqueta_puerto.pack(
+    pady=5
+)
+
+
+# ==========================================================
+# CASILLA PARA SETPOINT
+# ==========================================================
+
+frame_sp = tk.Frame(
+    ventana
+)
+
+frame_sp.pack(
+    pady=10
+)
+
+
+etiqueta_sp = tk.Label(
+    frame_sp,
+    text="Nuevo SP (%):"
+)
+
+etiqueta_sp.pack(
+    side=tk.LEFT,
+    padx=5
+)
+
+
+entrada_sp = tk.Entry(
+    frame_sp,
+    width=10
+)
+
+entrada_sp.pack(
+    side=tk.LEFT,
+    padx=5
+)
+
+
+# ==========================================================
+# ESTADO
+# ==========================================================
+
+etiqueta_estado = tk.Label(
+    ventana,
+    text="Esperando nuevo SP..."
+)
+
+etiqueta_estado.pack(
+    pady=5
+)
+
+
+# ==========================================================
+# TITULO DEL MONITOR
+# ==========================================================
+
+etiqueta_monitor = tk.Label(
+    ventana,
+    text="MONITOR DE DATOS",
+    font=("Arial", 11, "bold")
+)
+
+etiqueta_monitor.pack(
+    pady=(10, 5)
+)
+
+
+# ==========================================================
+# FRAME PARA MONITOR Y BARRA DE DESPLAZAMIENTO
+# ==========================================================
+
+frame_monitor = tk.Frame(
+    ventana
+)
+
+frame_monitor.pack(
+    padx=10,
+    pady=5,
+    fill=tk.BOTH,
+    expand=True
+)
+
+
+# ==========================================================
+# BARRA DE DESPLAZAMIENTO
+# ==========================================================
+
+scroll_monitor = tk.Scrollbar(
+    frame_monitor
+)
+
+scroll_monitor.pack(
+    side=tk.RIGHT,
+    fill=tk.Y
+)
+
+
+# ==========================================================
+# MONITOR DE DATOS
+# ==========================================================
+#
+# state="disabled" evita que el usuario pueda modificar
+# accidentalmente los datos mostrados.
+#
+# ==========================================================
+
+monitor = tk.Text(
+    frame_monitor,
+    width=90,
+    height=15,
+    font=("Consolas", 9),
+    state="disabled",
+    yscrollcommand=scroll_monitor.set
+)
+
+monitor.pack(
+    side=tk.LEFT,
+    fill=tk.BOTH,
+    expand=True
+)
+
+
+scroll_monitor.config(
+    command=monitor.yview
+)
+
+
+# ==========================================================
+# MOSTRAR DATOS EN EL MONITOR VISUAL
+# ==========================================================
+#
+# Esta función recibe una línea y la agrega al monitor.
+#
+# Como el monitor está bloqueado, Python lo habilita
+# temporalmente, escribe y lo vuelve a bloquear.
+#
+# ==========================================================
+
+def mostrar_en_monitor(texto):
+
+    def actualizar():
+
+        # Habilitar temporalmente
+        monitor.config(
+            state="normal"
+        )
+
+
+        # Agregar nueva línea
+        monitor.insert(
+            tk.END,
+            texto + "\n"
+        )
+
+
+        # Ir automáticamente a la última línea
+        monitor.see(
+            tk.END
+        )
+
+
+        # Volver a bloquear
+        monitor.config(
+            state="disabled"
+        )
+
+
+    # Tkinter debe actualizarse desde su hilo principal
+    ventana.after(
+        0,
+        actualizar
+    )
+
+
+# ==========================================================
+# FUNCION PARA RECIBIR DATOS
+# ==========================================================
+
+def recibir_datos():
+
+    global ejecutando
+
+
+    while ejecutando:
+
+        try:
+
+            # =================================================
+            # LEER LINEA SERIAL
+            # =================================================
+
+            linea = puerto.readline().decode(
+                "utf-8",
+                errors="ignore"
+            ).strip()
+
+
+            if not linea:
+
+                continue
+
+
+            # =================================================
+            # MOSTRAR TAMBIEN EN CONSOLA
+            # =================================================
+
+            print(linea)
+
+
+            # =================================================
+            # MOSTRAR EN EL MONITOR DE LA VENTANA
+            # =================================================
+
+            mostrar_en_monitor(
+                linea
+            )
+
+
+            # =================================================
+            # EXTRAER DATOS
+            # =================================================
+
+            resultado = patron.search(
+                linea
+            )
+
+
+            if resultado:
+
+                pot = int(
+                    resultado.group(1)
+                )
+
+                ldr = int(
+                    resultado.group(2)
+                )
+
+                sp = int(
+                    resultado.group(3)
+                )
+
+                error = int(
+                    resultado.group(4)
+                )
+
+                pwm = int(
+                    resultado.group(5)
+                )
+
+                sentido = resultado.group(6)
+
+
+                # =================================================
+                # TIEMPO TRANSCURRIDO
+                # =================================================
+
+                tiempo = time.time() - inicio
+
+
+                # =================================================
+                # GUARDAR EN TXT
+                # =================================================
+
+                archivo.write(
+                    f"{tiempo:.2f}\t"
+                    f"{pot}\t"
+                    f"{ldr}\t"
+                    f"{sp}\t"
+                    f"{error}\t"
+                    f"{pwm}\t"
+                    f"{sentido}\n"
+                )
+
+
+                # =================================================
+                # FORZAR ACTUALIZACION DEL TXT
+                # =================================================
+                #
+                # De esta forma los datos quedan escritos
+                # inmediatamente en el archivo.
+                #
+                # =================================================
+
+                archivo.flush()
+
+
+        except serial.SerialException as error:
+
+            print()
+
+            print(
+                "Error serial:",
+                error
+            )
+
+            ejecutando = False
+
+            break
+
+
+# ==========================================================
+# FUNCION PARA ENVIAR SETPOINT
+# ==========================================================
+
+def enviar_setpoint():
+
+    texto = entrada_sp.get()
+
+
+    try:
+
+        nuevo_sp = int(
+            texto
+        )
+
+
+        # ====================================================
+        # COMPROBAR RANGO
+        # ====================================================
+
+        if 0 <= nuevo_sp <= 100:
+
+            # =================================================
+            # ENVIAR AL ATMEGA
+            # =================================================
+
+            puerto.write(
+                str(nuevo_sp).encode("utf-8")
+            )
+
+
+            # =================================================
+            # MOSTRAR CONFIRMACION
+            # =================================================
+
+            etiqueta_estado.config(
+                text=f"SP enviado: {nuevo_sp} %"
+            )
+
+
+            # =================================================
+            # LIMPIAR CASILLA
+            # =================================================
+
+            entrada_sp.delete(
+                0,
+                tk.END
+            )
+
+
+            # =================================================
+            # DEVOLVER FOCO A LA CASILLA
+            # =================================================
+
+            entrada_sp.focus_set()
+
+
+        else:
+
+            etiqueta_estado.config(
+                text="El SP debe estar entre 0 y 100 %"
+            )
+
+
+    except ValueError:
+
+        etiqueta_estado.config(
+            text="Ingrese un número válido"
+        )
+
+
+# ==========================================================
+# FUNCION PARA CERRAR ADQUISICION
+# ==========================================================
+
+def cerrar_programa():
+
+    global ejecutando
+
+    ejecutando = False
+
+    ventana.destroy()
+
+
+# ==========================================================
+# BOTON ENVIAR
+# ==========================================================
+
+boton_enviar = tk.Button(
+    frame_sp,
+    text="Enviar",
+    command=enviar_setpoint
+)
+
+boton_enviar.pack(
+    side=tk.LEFT,
+    padx=5
+)
+
+
+# ==========================================================
+# PERMITIR ENVIAR CON ENTER
+# ==========================================================
+
+entrada_sp.bind(
+    "<Return>",
+    lambda event: enviar_setpoint()
+)
+
+
+# ==========================================================
+# DAR FOCO AUTOMATICAMENTE A LA CASILLA
+# ==========================================================
+
+entrada_sp.focus_set()
+
+
+# ==========================================================
+# CERRAR VENTANA
+# ==========================================================
+
+ventana.protocol(
+    "WM_DELETE_WINDOW",
+    cerrar_programa
+)
+
+
+# ==========================================================
+# INICIAR HILO DE RECEPCION
+# ==========================================================
+#
+# El hilo recibe continuamente los datos seriales mientras
+# Tkinter mantiene funcionando la ventana.
+#
+# ==========================================================
+
+hilo = threading.Thread(
+    target=recibir_datos,
+    daemon=True
+)
+
+hilo.start()
+
+
+# ==========================================================
+# EJECUTAR INTERFAZ
+# ==========================================================
+
+ventana.mainloop()
+
+
+# ==========================================================
+# FINALIZAR ADQUISICION
+# ==========================================================
+
+ejecutando = False
+
+
+# Esperar brevemente al hilo
+
+hilo.join(
+    timeout=1
+)
+
+
+# ==========================================================
+# CERRAR PUERTO
+# ==========================================================
+
+puerto.close()
+
+
+# ==========================================================
+# CERRAR TXT
+# ==========================================================
+
+archivo.close()
+
+
+print()
+
+print("========================================")
+print(" ADQUISICION FINALIZADA")
+print("========================================")
+
+print()
+
+print("Puerto serial cerrado.")
+
+print(
+    "Datos guardados en:",
+    ARCHIVO
+)
+
+
+# ==========================================================
+# LEER TXT
+# ==========================================================
+
+tiempos = []
+
+valores_pot = []
+
+valores_ldr = []
+
+setpoints = []
+
+errores = []
+
+pwms = []
+
+
+with open(
+    ARCHIVO,
+    "r"
+) as archivo_lectura:
+
+
+    # ======================================================
+    # SALTAR CABECERA
+    # ======================================================
+
+    next(
+        archivo_lectura
+    )
+
+
+    # ======================================================
+    # LEER DATOS
+    # ======================================================
+
+    for linea in archivo_lectura:
+
+        datos = linea.strip().split(
+            "\t"
+        )
+
+
+        if len(datos) >= 7:
+
+            tiempos.append(
+                float(datos[0])
+            )
+
+            valores_pot.append(
+                int(datos[1])
+            )
+
+            valores_ldr.append(
+                int(datos[2])
+            )
+
+            setpoints.append(
+                int(datos[3])
+            )
+
+            errores.append(
+                int(datos[4])
+            )
+
+            pwms.append(
+                int(datos[5])
+            )
+
+
+# ==========================================================
+# VERIFICAR SI HAY DATOS
+# ==========================================================
+
+if len(tiempos) == 0:
+
+    print()
+
+    print(
+        "No se recibieron datos para graficar."
+    )
+
+
+else:
+
+    # ======================================================
+    # CREAR FIGURA
+    # ======================================================
+
+    figura, eje_porcentaje = plt.subplots(
+        figsize=(12, 7)
+    )
+
+
+    # ======================================================
+    # GRAFICAR POT
+    # ======================================================
+
+    linea_pot, = eje_porcentaje.plot(
+        tiempos,
+        valores_pot,
+        label="POT"
+    )
+
+
+    # ======================================================
+    # GRAFICAR LDR
+    # ======================================================
+
+    linea_ldr, = eje_porcentaje.plot(
+        tiempos,
+        valores_ldr,
+        label="LDR"
+    )
+
+
+    # ======================================================
+    # GRAFICAR SETPOINT
+    # ======================================================
+
+    linea_sp, = eje_porcentaje.plot(
+        tiempos,
+        setpoints,
+        label="SP"
+    )
+
+
+    # ======================================================
+    # GRAFICAR ERROR
+    # ======================================================
+
+    linea_error, = eje_porcentaje.plot(
+        tiempos,
+        errores,
+        label="ERROR"
+    )
+
+
+    # ======================================================
+    # CONFIGURACION EJE PRINCIPAL
+    # ======================================================
+
+    eje_porcentaje.set_xlabel(
+        "Tiempo [s]"
+    )
+
+    eje_porcentaje.set_ylabel(
+        "Valor [%]"
+    )
+
+
+    # ERROR puede ser negativo
+
+    eje_porcentaje.set_ylim(
+        -100,
+        100
+    )
+
+
+    eje_porcentaje.grid(
+        True
+    )
+
+
+    # ======================================================
+    # CREAR SEGUNDO EJE PARA PWM
+    # ======================================================
+    #
+    # POT, LDR, SP y ERROR utilizan porcentajes.
+    #
+    # PWM utiliza valores entre:
+    #
+    # 0 y 255
+    #
+    # Por eso utilizamos un segundo eje vertical.
+    #
+    # ======================================================
+
+    eje_pwm = eje_porcentaje.twinx()
+
+
+    # ======================================================
+    # GRAFICAR PWM
+    # ======================================================
+
+    linea_pwm, = eje_pwm.plot(
+        tiempos,
+        pwms,
+        label="PWM",
+        linestyle="--"
+    )
+
+
+    # ======================================================
+    # CONFIGURAR EJE PWM
+    # ======================================================
+
+    eje_pwm.set_ylabel(
+        "PWM [0 - 255]"
+    )
+
+
+    eje_pwm.set_ylim(
+        0,
+        255
+    )
+
+
+    # ======================================================
+    # TITULO
+    # ======================================================
+
+    plt.title(
+        "Respuesta del Control Proporcional"
+    )
+
+
+    # ======================================================
+    # LEYENDA CON TODAS LAS VARIABLES
+    # ======================================================
+
+    lineas = [
+        linea_pot,
+        linea_ldr,
+        linea_sp,
+        linea_error,
+        linea_pwm
+    ]
+
+
+    etiquetas = [
+        linea.get_label()
+        for linea in lineas
+    ]
+
+
+    eje_porcentaje.legend(
+        lineas,
+        etiquetas,
+        loc="best"
+    )
+
+
+    # ======================================================
+    # AJUSTAR GRAFICA
+    # ======================================================
+
+    figura.tight_layout()
+
+
+    # ======================================================
+    # GUARDAR GRAFICA COMO IMAGEN
+    # ======================================================
+
+    figura.savefig(
+        NOMBRE_GRAFICA,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+
+    print()
+
+    print(
+        "Gráfica guardada en:",
+        NOMBRE_GRAFICA
+    )
+
+
+    # ======================================================
+    # MOSTRAR GRAFICA
+    # ======================================================
+
+    plt.show()
