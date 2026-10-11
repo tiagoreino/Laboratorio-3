@@ -1,0 +1,8 @@
+->Para ejecutar el código de Python tener en cuenta que se deben tener las librerías correspondientes, ya que están presentes librerías especiales para crear la comunicación Serial (pyserial) y la librería para crear la ventana visual (tkinter).
+
+->Simulación completa en PICSimLab a través del Virtual Terminal:
+ -potenciómetro en PC0 - es el que indica posición del motor, si llega a uno de los límites puede bloquear el movimiento del motor, usado para protección
+ -potenciómetro en PC1 - es el que simula la LDR aportando el valor correspondiente para ejecutar el control
+ -Led PD4 - indica movimiento a la IZQUIERDA
+ -Led PD5 - indica movimiento a la DERECHA
+ -Led PD6 - conectado a la salida del PWM mostrando intensidad por ancho de pulsos
