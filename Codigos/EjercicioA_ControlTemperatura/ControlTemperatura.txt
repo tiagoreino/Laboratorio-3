@@ -1,0 +1,495 @@
+//===========================================================
+// PROBLEMA A 
+//===========================================================
+// POT1: PC0/ADC0/A0. 0..5 V representa 0..100 grados C.
+// MOTOR: IN1=PD4/D4, IN2=PD5/D5, PWM=PD6/D6/OC0A.
+// CALEFACTOR: LED activo alto en PD7/D7.
+// LCD: RS=PB0/D8, EN=PB1/D9, D4..D7=PB2..PB5/D10..D13.
+// LCD RW=GND, VSS=GND, VDD=5V, V0=contraste.
+// UART: PD0/RX <- TX terminal; PD1/TX -> RX terminal.
+// Terminal: 9600, 8N1, opcion New line antes de SEND.
+// Comandos: H ayuda, S estado, R restaurar, M 30 centro=30.
+// El centro se guarda en RAM: reiniciar restaura 22 grados.
+// Misma escala, pines, rangos, PWM y columnas CSV del PZW anterior.
+// Una PT100 real requiere acondicionamiento; el POT lo representa.
+
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdint.h>
+
+//===========================================================
+// DEFINICIONES Y VARIABLES GLOBALES
+//===========================================================
+#define BAUD 9600
+#define UBRR_VALOR ((F_CPU / 16 / BAUD) - 1)
+#define CANAL_POT 0
+#define MOTOR_IN1 PD4
+#define MOTOR_IN2 PD5
+#define MOTOR_PWM PD6
+#define CALEFACTOR PD7
+#define LCD_RS PB0
+#define LCD_EN PB1
+
+#define CALOR 0
+#define IDEAL 1
+#define BAJO 2
+#define MEDIO 3
+#define ALTO 4
+
+uint16_t valor_adc = 0;
+uint16_t temperatura = 0;
+uint8_t punto_medio = 22;
+uint8_t accion = IDEAL;
+uint8_t pwm_motor = 0;
+
+uint32_t tiempo_ms = 0;
+uint16_t contador_anterior = 0;
+uint16_t fraccion_tiempo = 0;
+
+// Buffer circular: guarda caracteres mientras LCD/UART trabajan.
+// No hay interrupciones: todas las variables se usan desde main.
+char buffer_rx[64];
+uint8_t entrada_rx = 0;
+uint8_t salida_rx = 0;
+uint8_t error_rx = 0;
+
+//===========================================================
+// TIMER1: RELOJ REAL PARA LA MEDICION CADA CINCO SEGUNDOS
+//===========================================================
+void TIEMPO_init(void)
+{
+	// Modo normal, prescaler 64. Timer1 avanza cada 4 us:
+	// 16 MHz / 64 = 250000 cuentas por segundo.
+	// No habilitamos interrupciones; leemos el contador TCNT1.
+	TCCR1A = 0;
+	TCCR1B = 0;
+	TIMSK1 = 0;
+	TCNT1 = 0;
+	tiempo_ms = 0;
+	contador_anterior = 0;
+	fraccion_tiempo = 0;
+	TCCR1B = (1 << CS11) | (1 << CS10);
+}
+
+uint32_t TIEMPO_leer_ms(void)
+{
+	uint16_t contador_actual;
+	uint16_t cuentas_transcurridas;
+	uint32_t total_cuentas;
+
+	contador_actual = TCNT1;
+	// La resta de 16 bits admite un desbordamiento de TCNT1.
+	cuentas_transcurridas = (uint16_t)(contador_actual - contador_anterior);
+	contador_anterior = contador_actual;
+
+	total_cuentas = (uint32_t)fraccion_tiempo + cuentas_transcurridas;
+	// Cada 250 cuentas de 4 us equivalen a 1 ms.
+	tiempo_ms += total_cuentas / 250;
+	fraccion_tiempo = total_cuentas % 250;
+	return tiempo_ms;
+	// Debe llamarse antes de que pasen 262 ms (vuelta de TCNT1).
+	// UART y LCD llaman SERVICIO_atender continuamente para cumplirlo.
+}
+
+//===========================================================
+// ADC: REFERENCIA AVcc Y LECTURA DEL POTENCIOMETRO
+//===========================================================
+void ADC_init(void)
+{
+	ADMUX = (1 << REFS0);
+	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+	DIDR0 = (1 << ADC0D);
+	// Prescaler 128: reloj del ADC = 125 kHz.
+}
+
+uint16_t ADC_leer(uint8_t canal)
+{
+	ADMUX = (1 << REFS0) | (canal & 0x0F);
+	ADCSRA |= (1 << ADSC);
+	while (ADCSRA & (1 << ADSC)) {}
+	return ADC;
+}
+
+uint16_t escalar_temperatura(uint16_t valor)
+{
+	// ADC 0..1023 -> 0..100 C, redondeado al entero mas cercano.
+	// uint32_t evita desbordar al multiplicar; 511 permite redondear.
+	return ((uint32_t)valor * 100 + 511) / 1023;
+}
+
+//===========================================================
+// UART: CONFIGURACION Y RECEPCION SIN INTERRUPCIONES
+//===========================================================
+void UART_init(void)
+{
+	UBRR0H = (uint8_t)(UBRR_VALOR >> 8);
+	UBRR0L = (uint8_t)UBRR_VALOR;
+	UCSR0A = 0;
+	UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+	// 9600 baudios, ocho bits, sin paridad, un bit de parada.
+}
+
+uint8_t UART_dato_disponible(void)
+{
+	return UCSR0A & (1 << RXC0);
+}
+
+char UART_recibir_char(void)
+{
+	return UDR0;
+}
+
+void UART_guardar_recibidos(void)
+{
+	uint8_t estado;
+	uint8_t siguiente;
+	char caracter;
+
+	while (UART_dato_disponible())
+	{
+		estado = UCSR0A;
+		caracter = UART_recibir_char();
+		siguiente = entrada_rx + 1;
+		if (siguiente >= 64) siguiente = 0;
+
+		if ((estado & ((1 << FE0) | (1 << DOR0) | (1 << UPE0))) ||
+		siguiente == salida_rx)
+		{
+			error_rx = 1;
+		}
+		else
+		{
+			buffer_rx[entrada_rx] = caracter;
+			entrada_rx = siguiente;
+		}
+	}
+}
+
+void SERVICIO_atender(void)
+{
+	// Mantener actualizado el reloj y guardar lo recibido.
+	// Solo guarda caracteres: no ejecuta comandos dentro de LCD/UART.
+	UART_guardar_recibidos();
+	TIEMPO_leer_ms();
+}
+
+//===========================================================
+// UART: ENVIO DE CARACTERES, TEXTO Y NUMEROS
+//===========================================================
+void UART_enviar_char(char dato)
+{
+	while (!(UCSR0A & (1 << UDRE0)))
+	{
+		SERVICIO_atender();
+	}
+	UDR0 = dato;
+	SERVICIO_atender();
+}
+
+void UART_enviar_texto(const char *texto)
+{
+	while (*texto)
+	{
+		UART_enviar_char(*texto);
+		texto++;
+	}
+}
+
+uint8_t NUMERO_convertir(uint32_t numero, char *texto)
+{
+	char invertido[10];
+	uint8_t cantidad = 0;
+	uint8_t i;
+
+	// Obtener digitos de derecha a izquierda: resto de dividir por 10.
+	do
+	{
+		invertido[cantidad] = '0' + (numero % 10);
+		cantidad++;
+		numero = numero / 10;
+	} while (numero > 0);
+
+	// Invertirlos para escribir el numero en el orden habitual.
+	for (i = 0; i < cantidad; i++)
+	{
+		texto[i] = invertido[cantidad - 1 - i];
+	}
+	texto[cantidad] = '\0';
+	return cantidad;
+	// El destino debe disponer de 11 posiciones: 10 digitos y '\0'.
+}
+
+void UART_enviar_numero(uint32_t numero)
+{
+	char texto[11];
+	NUMERO_convertir(numero, texto);
+	UART_enviar_texto(texto);
+}
+
+//===========================================================
+// LCD 16x2: ENVIO EN MODO DE CUATRO BITS
+//===========================================================
+void LCD_enviar_4bits(uint8_t dato)
+{
+	// D4..D7 del LCD se conectan a PB2..PB5.
+	PORTB = (PORTB & 0xC3) | ((dato & 0x0F) << 2);
+	PORTB |= (1 << LCD_EN);
+	_delay_us(2);
+	PORTB &= ~(1 << LCD_EN);
+	_delay_us(50);
+	SERVICIO_atender();
+}
+
+void LCD_enviar_byte(uint8_t dato, uint8_t es_caracter)
+{
+	if (es_caracter == 1) PORTB |= (1 << LCD_RS);
+	else PORTB &= ~(1 << LCD_RS);
+
+	LCD_enviar_4bits(dato >> 4);
+	LCD_enviar_4bits(dato);
+}
+
+void LCD_init(void)
+{
+	// Inicializar antes de UART: estas esperas largas solo ocurren al inicio.
+	DDRB |= 0x3F;
+	PORTB &= ~0x3F;
+	_delay_ms(40);
+	LCD_enviar_4bits(3);
+	_delay_ms(5);
+	LCD_enviar_4bits(3);
+	_delay_us(150);
+	LCD_enviar_4bits(3);
+	LCD_enviar_4bits(2);
+	LCD_enviar_byte(0x28, 0); // Cuatro bits, dos filas, caracteres 5x8.
+	LCD_enviar_byte(0x0C, 0); // Pantalla encendida, cursor apagado.
+	LCD_enviar_byte(0x06, 0); // Avanzar al escribir.
+	LCD_enviar_byte(0x01, 0); // Borrar pantalla.
+	_delay_ms(2);
+}
+
+void LCD_posicion(uint8_t fila)
+{
+	if (fila == 0) LCD_enviar_byte(0x80, 0);
+	else LCD_enviar_byte(0xC0, 0);
+}
+
+void LCD_enviar_texto(const char *texto)
+{
+	while (*texto)
+	{
+		LCD_enviar_byte(*texto, 1);
+		texto++;
+	}
+}
+
+void LCD_enviar_numero(uint16_t numero, uint8_t ancho, char relleno)
+{
+	char texto[11];
+	uint8_t cantidad;
+
+	cantidad = NUMERO_convertir(numero, texto);
+	while (cantidad < ancho)
+	{
+		LCD_enviar_byte(relleno, 1);
+		cantidad++;
+	}
+	LCD_enviar_texto(texto);
+}
+
+//===========================================================
+// NOMBRE DE LA ACCION: IF/ELSE EN VEZ DE ARREGLO DE CADENAS
+//===========================================================
+const char *ACCION_nombre(void)
+{
+	if (accion == CALOR) return "CALENTANDO";
+	else if (accion == IDEAL) return "IDEAL";
+	else if (accion == BAJO) return "V_BAJA";
+	else if (accion == MEDIO) return "V_MEDIA";
+	else return "V_ALTA";
+}
+
+void LCD_actualizar(void)
+{
+	// Primera fila: temperatura y accion. Escribir 16 posiciones
+	// evita dejar letras de una accion anterior en la pantalla.
+	LCD_posicion(0);
+	LCD_enviar_texto("T:");
+	LCD_enviar_numero(temperatura, 3, ' ');
+	LCD_enviar_texto("C ");
+	LCD_enviar_texto(ACCION_nombre());
+	if (accion == BAJO || accion == ALTO) LCD_enviar_texto(" ");
+	LCD_enviar_texto("    ");
+
+	// Segunda fila: I = rango ideal; M = punto medio.
+	LCD_posicion(1);
+	LCD_enviar_texto("I:");
+	LCD_enviar_numero(punto_medio - 6, 2, '0');
+	LCD_enviar_texto("-");
+	LCD_enviar_numero(punto_medio + 6, 2, '0');
+	LCD_enviar_texto(" M:");
+	LCD_enviar_numero(punto_medio, 2, '0');
+	LCD_enviar_texto("    ");
+}
+
+//===========================================================
+// MOTOR Y CALEFACTOR: CONFIGURACION Y CONTROL POR RANGOS
+//===========================================================
+void MOTOR_init(void)
+{
+	DDRD |= (1 << MOTOR_IN1) | (1 << MOTOR_IN2) |
+	(1 << MOTOR_PWM) | (1 << CALEFACTOR);
+	PORTD &= ~((1 << MOTOR_IN1) | (1 << MOTOR_IN2) |
+	(1 << MOTOR_PWM) | (1 << CALEFACTOR));
+
+	// Timer0 Fast PWM de 8 bits, prescaler 64: 976.56 Hz.
+	// La salida OC0A se conecta solo cuando el motor debe girar.
+	TCCR0A = (1 << WGM01) | (1 << WGM00);
+	TCCR0B = (1 << CS01) | (1 << CS00);
+	OCR0A = 0;
+}
+
+void CONTROL_actualizar(void)
+{
+	int16_t desplazamiento;
+	desplazamiento = (int16_t)punto_medio - 22;
+
+	// Desplazar todos los limites mantiene las mismas anchuras.
+	if ((int16_t)temperatura <= 15 + desplazamiento)
+	{
+		accion = CALOR;
+		pwm_motor = 0;
+	}
+	else if ((int16_t)temperatura <= 28 + desplazamiento)
+	{
+		accion = IDEAL;
+		pwm_motor = 0;
+	}
+	else if ((int16_t)temperatura <= 39 + desplazamiento)
+	{
+		accion = BAJO;
+		pwm_motor = 100;
+	}
+	else if ((int16_t)temperatura <= 50 + desplazamiento)
+	{
+		accion = MEDIO;
+		pwm_motor = 170;
+	}
+	else
+	{
+		accion = ALTO;
+		pwm_motor = 254;
+	}
+
+	if (accion == CALOR) PORTD |= (1 << CALEFACTOR);
+	else PORTD &= ~(1 << CALEFACTOR);
+
+	PORTD &= ~(1 << MOTOR_IN2);
+	if (pwm_motor > 0)
+	{
+		PORTD |= (1 << MOTOR_IN1);
+		OCR0A = pwm_motor;
+		TCCR0A |= (1 << COM0A1);
+	}
+	else
+	{
+		// Desconectar OC0A evita el pulso residual de PWM=0.
+		TCCR0A &= ~(1 << COM0A1);
+		OCR0A = 0;
+		PORTD &= ~((1 << MOTOR_IN1) | (1 << MOTOR_PWM));
+	}
+}
+
+//===========================================================
+// DATOS CSV PARA REGISTRAR/GRAFICAR CON PYTHON O MATLAB
+//===========================================================
+void UART_enviar_registro(const char *tipo, uint32_t instante)
+{
+	// Mismas columnas del programa anterior, sin snprintf.
+	UART_enviar_texto(tipo);
+	UART_enviar_texto(","); UART_enviar_numero(instante);
+	UART_enviar_texto(","); UART_enviar_numero(valor_adc);
+	UART_enviar_texto(","); UART_enviar_numero(temperatura);
+	UART_enviar_texto(","); UART_enviar_texto(ACCION_nombre());
+	UART_enviar_texto(",");
+	if (accion == CALOR) UART_enviar_numero(1);
+	else UART_enviar_numero(0);
+	UART_enviar_texto(","); UART_enviar_numero(pwm_motor);
+	UART_enviar_texto(","); UART_enviar_numero(punto_medio);
+	UART_enviar_texto(","); UART_enviar_numero(punto_medio - 6);
+	UART_enviar_texto(","); UART_enviar_numero(punto_medio + 6);
+	UART_enviar_texto("\r\n");
+}
+
+//===========================================================
+// MENU: AYUDA E INTERPRETACION DE COMANDOS
+//===========================================================
+void UART_mostrar_menu(void)
+{
+	UART_enviar_texto("# H ayuda | S estado | R centro=22 | M 30 centro=30 (7..70 C)\r\n");
+	UART_enviar_texto("# Terminar con CR/LF. POT1: 0..5V = 0..100 C. Muestreo 5 s.\r\n");
+}
+
+void UART_procesar_comando(char *texto)
+{
+	uint8_t i;
+	uint8_t digitos;
+	uint16_t nuevo_punto;
+	uint8_t valido;
+
+	// Un comando de una sola letra debe terminar en '\0'.
+	if ((texto[0] == 'H' || texto[0] == 'h') && texto[1] == '\0')
+	{
+		UART_mostrar_menu();
+		return;
+	}
+	if ((texto[0] == 'S' || texto[0] == 's') && texto[1] == '\0')
+	{
+		UART_enviar_registro("STATUS", TIEMPO_leer_ms());
+		return;
+	}
+
+	if ((texto[0] == 'R' || texto[0] == 'r') && texto[1] == '\0')
+	{
+		nuevo_punto = 22;
+	}
+	else if ((texto[0] == 'M' || texto[0] == 'm') && texto[1] == ' ')
+	{
+		// Convertir digitos directamente: numero = numero*10 + digito.
+		// No necesitamos atoi ni strtol. Se admite M 30 o M +30.
+		i = 2;
+		while (texto[i] == ' ' || texto[i] == '\t') i++;
+		if (texto[i] == '+') i++;
+		nuevo_punto = 0;
+		digitos = 0;
+		valido = 1;
+		while (texto[i] != '\0')
+		{
+			if (texto[i] < '0' || texto[i] > '9')
+			{
+				valido = 0;
+				break;
+			}
+			// Validar antes de seguir multiplicando evita desbordamientos.
+			nuevo_punto = nuevo_punto * 10 + (texto[i] - '0');
+			digitos++;
+			if (nuevo_punto > 70)
+			{
+				valido = 0;
+				break;
+			}
+			i++;
+		}
+		if (valido == 0 || digitos == 0 || nuevo_punto < 7)
+		{
+			UART_enviar_texto("# ERROR: centro entero 7..70\r\n");
+			return;
+		}
+	}
+	else
+	{
+		UART_enviar_texto("# ERROR: comando. H para ayuda\r\n");
+		return;
+	}
