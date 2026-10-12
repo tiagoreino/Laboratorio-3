@@ -493,3 +493,111 @@ void UART_procesar_comando(char *texto)
 		UART_enviar_texto("# ERROR: comando. H para ayuda\r\n");
 		return;
 	}
+
+	punto_medio = nuevo_punto;
+	CONTROL_actualizar();
+	LCD_actualizar();
+	UART_enviar_registro("EVENT", TIEMPO_leer_ms());
+	// EVENT utiliza la ultima temperatura; no adelanta la medicion ADC.
+}
+
+void UART_revisar_menu(void)
+{
+	// static conserva la linea entre llamadas, incluso al escribir despacio.
+	static char linea[24];
+	static uint8_t indice = 0;
+	static uint8_t descartar = 0;
+	char caracter;
+
+	SERVICIO_atender();
+	if (error_rx)
+	{
+		salida_rx = entrada_rx;
+		error_rx = 0;
+		indice = 0;
+		descartar = 1;
+		UART_enviar_texto("# ERROR RX: reenviar comando tras CR/LF\r\n");
+	}
+
+	while (salida_rx != entrada_rx)
+	{
+		caracter = buffer_rx[salida_rx];
+		salida_rx++;
+		if (salida_rx >= 64) salida_rx = 0;
+
+		if (caracter == '\r' || caracter == '\n')
+		{
+			if (descartar) UART_enviar_texto("# ERROR: linea descartada\r\n");
+			else if (indice > 0)
+			{
+				linea[indice] = '\0';
+				UART_procesar_comando(linea);
+			}
+			indice = 0;
+			descartar = 0;
+		}
+		else if (caracter == '\b' || caracter == 127)
+		{
+			if (indice > 0) indice--;
+		}
+		else if (descartar == 0)
+		{
+			if (indice < 23)
+			{
+				linea[indice] = caracter;
+				indice++;
+			}
+			else descartar = 1;
+		}
+	}
+}
+
+//===========================================================
+// MEDICION: ADC, CONTROL, LCD Y REGISTRO
+//===========================================================
+void TEMPERATURA_medir(void)
+{
+	uint32_t instante;
+	instante = TIEMPO_leer_ms();
+	valor_adc = ADC_leer(CANAL_POT);
+	temperatura = escalar_temperatura(valor_adc);
+	CONTROL_actualizar();
+	LCD_actualizar();
+	UART_enviar_registro("DATA", instante);
+}
+
+//===========================================================
+// PROGRAMA PRINCIPAL
+//===========================================================
+int main(void)
+{
+	uint32_t proxima_medicion;
+
+	MOTOR_init();
+	ADC_init();
+	TIEMPO_init();
+	LCD_init();
+	UART_init();
+
+	UART_enviar_texto("# Problema A \r\n");
+	UART_mostrar_menu();
+	UART_enviar_texto("# tipo,ms,adc,temp_C,accion,calefactor,pwm,centro_C,ideal_min_C,ideal_max_C\r\n");
+
+	proxima_medicion = TIEMPO_leer_ms() + 5000;
+	TEMPERATURA_medir();
+
+	while (1)
+	{
+		// El tiempo procede del Timer1; PWM sigue funcionando por hardware.
+		// 1. Atender el menu sin bloquear esperando caracteres.
+		UART_revisar_menu();
+
+		// 2. Medir cuando llegue el plazo de cinco segundos.
+		// int32_t permite comparar aun al desbordarse el reloj de 32 bits.
+		if ((int32_t)(TIEMPO_leer_ms() - proxima_medicion) >= 0)
+		{
+			proxima_medicion += 5000;
+			TEMPERATURA_medir();
+		}
+	}
+}
