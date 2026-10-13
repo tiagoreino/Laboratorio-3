@@ -260,3 +260,129 @@ typedef struct {
 	uint8_t angulo_servo;  // Grados servomotor
 	uint8_t led_r, led_g, led_b; // Color matriz WS2812
 } ColorRef;
+
+// Tabla patron calibración, tolerancia independiente por color
+ColorRef patrones[4] = { //    Valores          Toleracncia    Mov. Servo      Colores Matriz
+	// Nombre        ADC_R   ADC_G   ADC_B     M_R   M_G   M_B    Servo   WS2812_R  WS2812_G  WS2812_B
+	{"Amarillo",     940,    879,    806,       30,   30,   30,       0,      255,      255,        0},
+	{"Verde",        847,    845,    758,       30,   30,   30,      30,        0,      255,        0},
+	{"Celeste",      871,    854,    856,       30,   30,   30,      60,        0,      225,      255},
+	{"Fucsia",       917,    809,    855,       30,   30,   30,      90,      100,        0,      100}
+};
+
+// Algoritmo clasificación, tolerancia individual.
+int8_t clasificar_color(uint16_t r, uint16_t g, uint16_t b) {
+	for (uint8_t i = 0; i < 4; i++) {
+		// Cálculo límite inferior y superior para R
+		uint16_t r_min = (patrones[i].r > patrones[i].m_r) ? (patrones[i].r - patrones[i].m_r) : 0;
+		uint16_t r_max = patrones[i].r + patrones[i].m_r;
+
+		// Cálculo límite inferior y superior para G
+		uint16_t g_min = (patrones[i].g > patrones[i].m_g) ? (patrones[i].g - patrones[i].m_g) : 0;
+		uint16_t g_max = patrones[i].g + patrones[i].m_g;
+
+		// Cálculo límite inferior y superior para B
+		uint16_t b_min = (patrones[i].b > patrones[i].m_b) ? (patrones[i].b - patrones[i].m_b) : 0;
+		uint16_t b_max = patrones[i].b + patrones[i].m_b;
+
+		// Comprobar si lecturas caen dentro de margen patrón
+		if ((r >= r_min && r <= r_max) &&
+		(g >= g_min && g <= g_max) &&
+		(b >= b_min && b <= b_max)) {
+			return i; // Color identificado en i
+		}
+	}
+	return -1; // Color no identificado
+}
+
+
+// Main Matriz
+
+int main(void) {
+	// Inicializar salidas y periféricos
+	WS2812_DDR |= (1 << WS2812_PIN);
+	ws2812_clear(); // Limpiar matriz al arranque
+	
+	UART0_init(103); // 9600 Baudios 16 MHz
+	ADC_init();
+	Servo_init();
+	LCD_init();  // Inicializar LCD I2C
+
+	// Mensaje bienvenida
+	LCD_set_cursor(0, 0);
+	LCD_string("Clasificador de");
+	LCD_set_cursor(1, 0);
+	LCD_string("Colorines UwU");
+	_delay_ms(1500);
+	LCD_command(0x01); // Limpiar pantalla
+
+	char buffer[32];
+	uint16_t lectura_R, lectura_G, lectura_B;
+	int8_t ultimo_idx = -2; // Seguimiento del estado anterior del servo
+
+	while (1) {
+		//Evakuación y muestreo (LEDs 0, 1 y 2)
+		
+		// Color Rojo y lectura de reflectancia
+		ws2812_set_eval_leds(255, 0, 0);
+		_delay_ms(150);
+		lectura_R = ADC_read(0);
+
+		// Color Verde y lectura de reflectancia
+		ws2812_set_eval_leds(0, 255, 0);
+		_delay_ms(150);
+		lectura_G = ADC_read(0);
+
+		// Color Azul y lectura de reflectancia
+		ws2812_set_eval_leds(0, 0, 255);
+		_delay_ms(150);
+		lectura_B = ADC_read(0);
+
+		//  Clasificación
+		int8_t idx = clasificar_color(lectura_R, lectura_G, lectura_B);
+
+		if (idx != -1) {
+			// Se reconoce  color y cambió posición:
+			if (idx != ultimo_idx) {
+				Servo_set_angle(patrones[idx].angulo_servo); // Mover servo (0°, 30°, 60° o 90°)
+				ultimo_idx = idx;
+			}
+
+			// Resultado matriz ( 8 al 63)
+			ws2812_set_display_leds(patrones[idx].led_r, patrones[idx].led_g, patrones[idx].led_b);
+
+			// Enviar datos por  UART
+			sprintf(buffer, "RGB:(%u,%u,%u)->%s\r\n", lectura_R, lectura_G, lectura_B, patrones[idx].nombre);
+			UART0_send_string(buffer);
+
+			//  Mostrar resultado en pantalla
+			LCD_set_cursor(0, 0);
+			sprintf(buffer, "Color: %-9s", patrones[idx].nombre);
+			LCD_string(buffer);
+
+			LCD_set_cursor(1, 0);
+			sprintf(buffer, "R:%-3u G:%-3u B:%-3u", lectura_R, lectura_G, lectura_B);
+			LCD_string(buffer);
+			} else {
+			// Lectura  fuera  margen:
+			ws2812_set_display_leds(0, 0, 0); // Apagar área visualización
+			
+			// Notificar por UART
+			sprintf(buffer, "RGB:(%u,%u,%u)->Desconocido\r\n", lectura_R, lectura_G, lectura_B);
+			UART0_send_string(buffer);
+
+			// Notificar por Pantalla LCD
+			LCD_set_cursor(0, 0);
+			LCD_string("Color:Desconocido");
+			
+			LCD_set_cursor(1, 0);
+			sprintf(buffer, "R:%-3u G:%-3u B:%-3u", lectura_R, lectura_G, lectura_B);
+			LCD_string(buffer);
+		}
+
+		// Espera entre ciclo y ciclo (3s)
+		_delay_ms(3000);
+	}
+
+	return 0;
+}
