@@ -1,0 +1,224 @@
+CALIBRE
+
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include <stdio.h>
+
+// Configuración matriz (PH3 / Pin 6)
+#define WS2812_PIN PH3
+#define WS2812_DDR DDRH
+#define WS2812_PORT PORTH
+
+#define NUM_LEDS 64
+
+typedef struct {
+	uint8_t g;
+	uint8_t r;
+	uint8_t b;
+} cRGB;
+
+cRGB leds[NUM_LEDS];
+
+void ws2812_send_byte(uint8_t b) {
+	for (uint8_t i = 0; i < 8; i++) {
+		if (b & 0x80) {
+			WS2812_PORT |= (1 << WS2812_PIN);
+			asm volatile ("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\t");
+			WS2812_PORT &= ~(1 << WS2812_PIN);
+			asm volatile ("nop\n\tnop\n\t");
+			} else {
+			WS2812_PORT |= (1 << WS2812_PIN);
+			asm volatile ("nop\n\tnop\n\t");
+			WS2812_PORT &= ~(1 << WS2812_PIN);
+			asm volatile ("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\t");
+		}
+		b <<= 1;
+	}
+}
+
+void ws2812_show(void) {
+	cli();
+	for (uint16_t i = 0; i < NUM_LEDS; i++) {
+		ws2812_send_byte(leds[i].g);
+		ws2812_send_byte(leds[i].r);
+		ws2812_send_byte(leds[i].b);
+	}
+	sei();
+	_delay_us(60);
+}
+
+// Prende solo  3 priemros LEDs
+void ws2812_set_eval_leds(uint8_t r, uint8_t g, uint8_t b) {
+	for (uint16_t i = 0; i < NUM_LEDS; i++) {
+		if (i < 3) {
+			leds[i].r = r;
+			leds[i].g = g;
+			leds[i].b = b;
+			} else {
+			leds[i].r = 0;
+			leds[i].g = 0;
+			leds[i].b = 0;
+		}
+	}
+	ws2812_show();
+}
+
+// Conevertir análogo a digital
+
+void ADC_init(void) {
+	ADMUX = (1 << REFS0); // AVcc (5V)
+	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); // Prescaler 128
+}
+
+uint16_t ADC_read(uint8_t channel) {
+	ADCSRB &= ~(1 << MUX5);
+	ADMUX = (ADMUX & 0xF0) | (channel & 0x07);
+	ADCSRA |= (1 << ADSC);
+	while (ADCSRA & (1 << ADSC));
+	return ADC;
+}
+
+// Promedio lecturas (elimina ruido luz)
+uint16_t ADC_read_promedio(uint8_t channel) {
+	uint32_t suma = 0;
+	for (uint8_t i = 0; i < 16; i++) {
+		suma += ADC_read(channel);
+		_delay_us(500);
+	}
+	return (uint16_t)(suma / 16);
+}
+
+// Comunicación UART
+
+void UART0_init(unsigned int ubrr) {
+	UBRR0H = (unsigned char)(ubrr >> 8);
+	UBRR0L = (unsigned char)ubrr;
+	UCSR0B = (1 << TXEN0);
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+void UART0_send_string(const char* str) {
+	while (*str) {
+		while (!(UCSR0A & (1 << UDRE0)));
+		UDR0 = *str++;
+	}
+}
+
+
+// Pantalla LCD
+
+#define LCD_DATA_PORT PORTA
+#define LCD_DATA_DDR  DDRA
+#define RS PA2
+#define EN PA3
+
+void LCD_pulse_enable(void) {
+	LCD_DATA_PORT |= (1 << EN);
+	_delay_us(1);
+	LCD_DATA_PORT &= ~(1 << EN);
+	_delay_us(100);
+}
+
+void LCD_send_nibble(uint8_t nibble) {
+	LCD_DATA_PORT = (LCD_DATA_PORT & 0x0F) | (nibble & 0xF0);
+	LCD_pulse_enable();
+}
+
+void LCD_command(uint8_t cmd) {
+	LCD_DATA_PORT &= ~(1 << RS);
+	LCD_send_nibble(cmd);
+	LCD_send_nibble(cmd << 4);
+	_delay_ms(2);
+}
+
+void LCD_char(uint8_t data) {
+	LCD_DATA_PORT |= (1 << RS);
+	LCD_send_nibble(data);
+	LCD_send_nibble(data << 4);
+	_delay_ms(2);
+}
+
+void LCD_init(void) {
+	LCD_DATA_DDR |= 0xFC;
+	_delay_ms(50);
+	
+	LCD_DATA_PORT &= ~(1 << RS);
+	LCD_send_nibble(0x30);
+	_delay_ms(5);
+	LCD_send_nibble(0x30);
+	_delay_us(150);
+	LCD_send_nibble(0x30);
+	LCD_send_nibble(0x20);
+
+	LCD_command(0x28);
+	LCD_command(0x0C);
+	LCD_command(0x01);
+	_delay_ms(5);
+}
+
+void LCD_string(const char* str) {
+	while (*str) LCD_char(*str++);
+}
+
+void LCD_set_cursor(uint8_t row, uint8_t col) {
+	uint8_t pos = (row == 0) ? (0x80 + col) : (0xC0 + col);
+	LCD_command(pos);
+}
+
+
+// Main calibración
+
+int main(void) {
+	WS2812_DDR |= (1 << WS2812_PIN);
+	
+	UART0_init(103); // 9600 Baudios
+	ADC_init();
+	LCD_init();
+
+	LCD_set_cursor(0, 0);
+	LCD_string("MODO CALIBRACION");
+	LCD_set_cursor(1, 0);
+	LCD_string("Muestreando A0..");
+	_delay_ms(1500);
+
+	char buffer[64];
+	uint16_t cal_R, cal_G, cal_B;
+
+	while (1) {
+// Muestra roja
+		ws2812_set_eval_leds(255, 0, 0);
+		_delay_ms(200);
+		cal_R = ADC_read_promedio(0);
+
+// Muestra verde
+		ws2812_set_eval_leds(0, 255, 0);
+		_delay_ms(200);
+		cal_G = ADC_read_promedio(0);
+
+// Muestra azul 
+		ws2812_set_eval_leds(0, 0, 255);
+		_delay_ms(200);
+		cal_B = ADC_read_promedio(0);
+
+// Apagar LEDs tras toma muestras
+		ws2812_set_eval_leds(0, 0, 0);
+
+// Imprimir en Pantalla LCD
+		LCD_set_cursor(0, 0);
+		LCD_string("PATRON CALIBRADO");
+		
+		LCD_set_cursor(1, 0);
+		sprintf(buffer, "R:%-4uG:%-4uB:%-4u", cal_R, cal_G, cal_B);
+		LCD_string(buffer);
+
+// Imprimir formato estructurado en Terminal Serie
+		sprintf(buffer, "CALIBRACION -> ADC_R: %u | ADC_G: %u | ADC_B: %u\r\n", cal_R, cal_G, cal_B);
+		UART0_send_string(buffer);
+
+		_delay_ms(2000); // Pausa entre muestras
+	}
+
+	return 0;
+}
